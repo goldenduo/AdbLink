@@ -18,8 +18,8 @@ var (
 )
 
 func main() {
-	listenAddr := flag.String("listen", ":9000", "Control listen address for Android agents")
-	webAddr := flag.String("web", ":9001", "Listen address for Web Dashboard and REST API (empty to disable)")
+	listenAddr := flag.String("listen", ":8888", "Control listen address for Android agents")
+	webAddr := flag.String("web", ":9999", "Listen address for Web Dashboard and REST API (empty to disable)")
 	advertiseHost := flag.String("host", "127.0.0.1", "Public hostname/IP to advertise for adb connect")
 	portMin := flag.Int("port-min", 55550, "Minimum port to assign for ADB connections")
 	portMax := flag.Int("port-max", 55599, "Maximum port to assign for ADB connections")

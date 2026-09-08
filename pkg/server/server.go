@@ -80,7 +80,7 @@ type Server struct {
 // NewServer creates a new AdbLink Server.
 func NewServer(cfg Config) (*Server, error) {
 	if cfg.ListenAddr == "" {
-		cfg.ListenAddr = ":9000"
+		cfg.ListenAddr = ":8888"
 	}
 	if cfg.AdvertiseHost == "" {
 		cfg.AdvertiseHost = "127.0.0.1"

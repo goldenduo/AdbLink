@@ -56,7 +56,7 @@ Use "adblink-ctl <command> -h" for more information about a command.`)
 
 func cmdList(args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
-	webAddr := fs.String("server", "http://127.0.0.1:9001", "AdbLink Web API URL")
+	webAddr := fs.String("server", "http://127.0.0.1:9999", "AdbLink Web API URL")
 	_ = fs.Parse(args)
 
 	url := strings.TrimRight(*webAddr, "/") + "/api/v1/devices"
@@ -102,7 +102,7 @@ func cmdList(args []string) {
 
 func cmdConnect(args []string) {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
-	webAddr := fs.String("server", "http://127.0.0.1:9001", "AdbLink Web API URL")
+	webAddr := fs.String("server", "http://127.0.0.1:9999", "AdbLink Web API URL")
 	_ = fs.Parse(args)
 
 	targetID := ""
@@ -158,7 +158,7 @@ func cmdConnect(args []string) {
 func cmdPush(args []string) {
 	fs := flag.NewFlagSet("push", flag.ExitOnError)
 	adbSerial := fs.String("s", "", "Target ADB device serial (e.g. 127.0.0.1:5558)")
-	serverAddr := fs.String("server", "172.17.0.1:9000", "AdbLink server address to connect back to")
+	serverAddr := fs.String("server", "172.17.0.1:8888", "AdbLink server address to connect back to")
 	agentBin := fs.String("bin", "", "Path to adblink-agent binary (auto-detects if empty)")
 	token := fs.String("token", "", "Authentication token")
 	_ = fs.Parse(args)
