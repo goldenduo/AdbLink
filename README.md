@@ -31,7 +31,7 @@ When an Android phone is behind NAT, firewalls, or mobile data networks (4G/5G) 
 ┌────────────────────────────────────────────────────────┐
 │                    Remote Server                       │
 │                                                        │
-│  [adblink-server] (:9000 control port, :9001 Web/API)  │
+│  [adblink-server] (:8888 control port, :9999 Web/API)  │
 │          │                                             │
 │          ├──────────────┬──────────────┬──────────────┐│
 │          ▼              ▼              ▼              ▼│
@@ -103,16 +103,16 @@ On your host or cloud server:
 
 ```bash
 ./bin/adblink-server \
-  -listen :9000 \
-  -web :9001 \
+  -listen :8888 \
+  -web :9999 \
   -host 127.0.0.1 \
   -port-min 55550 \
   -port-max 55599
 ```
 
 Flags:
-- `-listen`: Agent control listen port (default `:9000`).
-- `-web`: Web dashboard & REST API listen port (default `:9001`).
+- `-listen`: Agent control listen port (default `:8888`).
+- `-web`: Web dashboard & REST API listen port (default `:9999`).
 - `-host`: Hostname/IP advertised for `adb connect` (use public IP if deploying remotely).
 - `-port-min` / `-port-max`: Port range allocated to connected devices.
 - `-token`: Optional authentication token.
@@ -124,7 +124,7 @@ Flags:
 #### Option A: One-click deploy via `adblink-ctl push`
 
 ```bash
-./bin/adblink-ctl push -s <device_serial> -server <server_ip>:9000
+./bin/adblink-ctl push -s <device_serial> -server <server_ip>:8888
 ```
 
 #### Option B: Manual deploy via ADB
@@ -135,10 +135,10 @@ adb push bin/android/adblink-agent-arm64 /data/local/tmp/adblink-agent
 adb shell chmod +x /data/local/tmp/adblink-agent
 
 # Run directly in adb shell (no nohup needed):
-adb shell /data/local/tmp/adblink-agent -server <server_ip>:9000
+adb shell /data/local/tmp/adblink-agent -server <server_ip>:8888
 
 # Or run silently in the background with -d (built-in daemon, no nohup needed):
-adb shell /data/local/tmp/adblink-agent -server <server_ip>:9000 -d
+adb shell /data/local/tmp/adblink-agent -server <server_ip>:8888 -d
 ```
 
 ---
@@ -179,6 +179,42 @@ make test-e2e
 ```bash
 docker-compose up -d
 ```
+
+---
+
+## Nginx Reverse Proxy (Domain Mapping)
+
+To access the Web Dashboard via a custom domain (e.g. `adb.126111.xyz` -> `:9999`):
+
+```nginx
+# /etc/nginx/conf.d/adblink.conf
+server {
+    listen 80;
+    listen [::]:80;
+
+    server_name adb.126111.xyz;
+    client_max_body_size 50m;
+
+    location / {
+        proxy_pass http://127.0.0.1:9999;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+```
+
+Reload nginx: `sudo nginx -t && sudo systemctl reload nginx`.
 
 ---
 

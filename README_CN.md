@@ -29,7 +29,7 @@
 ┌────────────────────────────────────────────────────────┐
 │                    Remote Server                       │
 │                                                        │
-│  [adblink-server] (:9000 控制监听, :9001 Web/API)        │
+│  [adblink-server] (:8888 控制监听, :9999 Web/API)        │
 │          │                                             │
 │          ├──────────────┬──────────────┬──────────────┐│
 │          ▼              ▼              ▼              ▼│
@@ -103,16 +103,16 @@ bin/
 
 ```bash
 ./bin/adblink-server \
-  -listen :9000 \
-  -web :9001 \
+  -listen :8888 \
+  -web :9999 \
   -host 127.0.0.1 \
   -port-min 55550 \
   -port-max 55599
 ```
 
 参数说明：
-- `-listen`：控制信道监听端口，手机 Agent 连接该端口（默认 `:9000`）。
-- `-web`：Web 管理控制台和 REST API 端口（默认 `:9001`）。
+- `-listen`：控制信道监听端口，手机 Agent 连接该端口（默认 `:8888`）。
+- `-web`：Web 管理控制台和 REST API 端口（默认 `:9999`）。
 - `-host`：服务端对外宣告的主机名或 IP（用于生成 `adb connect <host>:<port>`，若在外网请填服务器外网 IP）。
 - `-port-min` / `-port-max`：分配给连接手机的 ADB 端口范围。
 - `-token`：可选安全验证密钥。
@@ -127,7 +127,7 @@ bin/
 
 ```bash
 # 自动检测架构、推送文件、后台启动
-./bin/adblink-ctl push -s <手机serial> -server <服务器IP>:9000
+./bin/adblink-ctl push -s <手机serial> -server <服务器IP>:8888
 ```
 
 #### 方式 B：手动推送与直接运行
@@ -140,16 +140,16 @@ adb push bin/android/adblink-agent-arm64 /data/local/tmp/adblink-agent
 adb shell chmod +x /data/local/tmp/adblink-agent
 
 # 3. 在 adb shell 中直接运行（无需 nohup 等任何复杂参数）：
-adb shell /data/local/tmp/adblink-agent -server <服务器IP>:9000
+adb shell /data/local/tmp/adblink-agent -server <服务器IP>:8888
 
 # 或者若需在后台静默运行，添加 -d 即可（程序自身守护，无需 nohup）：
-adb shell /data/local/tmp/adblink-agent -server <服务器IP>:9000 -d
+adb shell /data/local/tmp/adblink-agent -server <服务器IP>:8888 -d
 ```
 
 成功连接后，日志将输出分配的端口号：
 ```text
 [AdbLink-Agent] Starting AdbLink Agent (ID: 0123456789ABCDEF, Model: Pixel 8, Android: 15)
-[AdbLink-Agent] Connecting to server at 192.168.1.100:9000...
+[AdbLink-Agent] Connecting to server at 192.168.1.100:8888...
 [AdbLink-Agent] ==> Successfully registered! Server exposed ADB port: 55550 (Host: 192.168.1.100)
 [AdbLink-Agent] ==> Connect from anywhere: adb connect 192.168.1.100:55550
 ```
@@ -180,7 +180,7 @@ adb -s 192.168.1.100:55550 logcat
 
 ## Web 控制台与 REST API
 
-打开浏览器访问 `http://<服务器IP>:9001` 即可查看管理仪表盘：
+打开浏览器访问 `http://<服务器IP>:9999`（或配置域名 `http://adb.126111.xyz`）即可查看管理仪表盘：
 
 - **实时设备列表**：显示设备 ID、机型、系统版本、在线状态、暴露端口。
 - **实时监控指标**：当前活动连接数、总连接数、传输字节数（Rx/Tx）、在线时长。
@@ -195,6 +195,40 @@ adb -s 192.168.1.100:55550 logcat
 | `GET` | `/api/v1/devices` | 获取所有已注册设备的 JSON 列表 |
 | `GET` | `/api/v1/devices/{id}` | 获取单个设备详情 |
 | `POST` | `/api/v1/devices/{id}/disconnect` | 断开指定设备的连接 |
+
+### Nginx 反向代理配置（域名映射示例）
+
+如果需要通过独立域名访问 Web 控制台（例如映射 `adb.126111.xyz` 到本地 `:9999` 端口）：
+
+```nginx
+# /etc/nginx/conf.d/adblink.conf
+server {
+    listen 80;
+    listen [::]:80;
+
+    server_name adb.126111.xyz;
+    client_max_body_size 50m;
+
+    location / {
+        proxy_pass http://127.0.0.1:9999;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+```
+
+配置完成后执行 `sudo nginx -t && sudo systemctl reload nginx` 即可生效。
 
 ---
 

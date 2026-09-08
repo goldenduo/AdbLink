@@ -21,8 +21,8 @@ WORKDIR /app
 COPY --from=builder /out/adblink-server /app/adblink-server
 COPY --from=builder /out/adblink-ctl /app/adblink-ctl
 
-# Expose control port (9000), web dashboard (9001), and ADB port range (55550-55599)
-EXPOSE 9000 9001 55550-55599
+# Expose control port (8888), web dashboard (9999), and ADB port range (55550-55599)
+EXPOSE 8888 9999 55550-55599
 
 ENTRYPOINT ["/app/adblink-server"]
-CMD ["-listen", ":9000", "-web", ":9001", "-port-min", "55550", "-port-max", "55599"]
+CMD ["-listen", ":8888", "-web", ":9999", "-port-min", "55550", "-port-max", "55599"]

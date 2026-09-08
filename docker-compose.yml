@@ -9,18 +9,18 @@ services:
     restart: unless-stopped
     ports:
       # Control port for Android agents
-      - "9000:9000"
+      - "8888:8888"
       # Web Dashboard & REST API
-      - "9001:9001"
+      - "9999:9999"
       # ADB proxy exposed port range for host adb connect
       - "55550-55599:55550-55599"
     environment:
       - TZ=Asia/Shanghai
     command:
       - "-listen"
-      - ":9000"
+      - ":8888"
       - "-web"
-      - ":9001"
+      - ":9999"
       - "-host"
       - "127.0.0.1" # Change to your server public IP/hostname if connecting externally
       - "-port-min"
