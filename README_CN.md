@@ -1,7 +1,8 @@
 # AdbLink - 高性能 Android ADB 反向穿透网关
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)](https://golang.org)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Android-green)](https://github.com/goldenduo/AdbLink)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Android%20%7C%20macOS%20%7C%20Windows-green)](https://github.com/goldenduo/AdbLink)
+[![Release](https://img.shields.io/github/v/release/goldenduo/AdbLink?display_name=tag&include_prereleases)](https://github.com/goldenduo/AdbLink/releases)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **AdbLink** 是一个专为 Android 设备设计的轻量级、高性能、生产级的 **ADB 反向穿透网关（Reverse Tunnel）**。

@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and Release Multi-Platform Binaries
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          check-latest: true
+
+      - name: Determine Version Tag
+        id: vars
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="v1.0.0-$(git rev-parse --short HEAD)"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Building version: ${TAG}"
+
+      - name: Run Unit Tests
+        run: |
+          go test -v -race ./pkg/...
+
+      - name: Compile Multi-Platform Binaries
+        run: |
+          VERSION="${{ steps.vars.outputs.tag }}" make build-all
+
+      - name: Package Release Assets
+        run: |
+          mkdir -p dist
+          TAG="${{ steps.vars.outputs.tag }}"
+
+          # 1. Standalone raw binaries for direct download
+          cp bin/android/adblink-agent-arm64 dist/adblink-agent-android-arm64
+          cp bin/android/adblink-agent-x86_64 dist/adblink-agent-android-x86_64
+          cp bin/android/adblink-agent-armv7 dist/adblink-agent-android-armv7
+          cp bin/android/adblink-agent-x86 dist/adblink-agent-android-x86
+
+          cp bin/linux/adblink-server-linux-amd64 dist/adblink-server-linux-amd64
+          cp bin/linux/adblink-server-linux-arm64 dist/adblink-server-linux-arm64
+          cp bin/linux/adblink-ctl-linux-amd64 dist/adblink-ctl-linux-amd64
+          cp bin/linux/adblink-ctl-linux-arm64 dist/adblink-ctl-linux-arm64
+
+          cp bin/darwin/adblink-server-darwin-amd64 dist/adblink-server-darwin-amd64
+          cp bin/darwin/adblink-server-darwin-arm64 dist/adblink-server-darwin-arm64
+          cp bin/darwin/adblink-ctl-darwin-amd64 dist/adblink-ctl-darwin-amd64
+          cp bin/darwin/adblink-ctl-darwin-arm64 dist/adblink-ctl-darwin-arm64
+
+          cp bin/windows/adblink-server-windows-amd64.exe dist/adblink-server-windows-amd64.exe
+          cp bin/windows/adblink-server-windows-arm64.exe dist/adblink-server-windows-arm64.exe
+          cp bin/windows/adblink-ctl-windows-amd64.exe dist/adblink-ctl-windows-amd64.exe
+          cp bin/windows/adblink-ctl-windows-arm64.exe dist/adblink-ctl-windows-arm64.exe
+
+          # 2. Bundled compressed archives
+          # Linux packages
+          tar -czf dist/adblink-${TAG}-linux-amd64.tar.gz -C bin/linux adblink-server-linux-amd64 adblink-ctl-linux-amd64
+          tar -czf dist/adblink-${TAG}-linux-arm64.tar.gz -C bin/linux adblink-server-linux-arm64 adblink-ctl-linux-arm64
+
+          # macOS packages
+          tar -czf dist/adblink-${TAG}-darwin-arm64.tar.gz -C bin/darwin adblink-server-darwin-arm64 adblink-ctl-darwin-arm64
+          tar -czf dist/adblink-${TAG}-darwin-amd64.tar.gz -C bin/darwin adblink-server-darwin-amd64 adblink-ctl-darwin-amd64
+
+          # Windows packages (zip)
+          (cd bin/windows && zip -q ../../dist/adblink-${TAG}-windows-amd64.zip adblink-server-windows-amd64.exe adblink-ctl-windows-amd64.exe)
+          (cd bin/windows && zip -q ../../dist/adblink-${TAG}-windows-arm64.zip adblink-server-windows-arm64.exe adblink-ctl-windows-arm64.exe)
+
+          # Android packages
+          tar -czf dist/adblink-agent-${TAG}-android-arm64.tar.gz -C bin/android adblink-agent-arm64
+          tar -czf dist/adblink-agent-${TAG}-android-x86_64.tar.gz -C bin/android adblink-agent-x86_64
+
+          # 3. Generate SHA-256 Checksums
+          cd dist
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: AdbLink ${{ steps.vars.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/*
