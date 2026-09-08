@@ -1,4 +1,4 @@
-.PHONY: all build build-agent build-server build-ctl test test-e2e clean docker-build help
+.PHONY: all build build-all build-agent build-server build-ctl test test-e2e clean docker-build help
 
 VERSION ?= 1.0.0
 BIN_DIR ?= bin
@@ -7,6 +7,10 @@ LDFLAGS = -s -w -X main.version=$(VERSION)
 all: build
 
 build: build-server build-ctl build-agent
+
+build-all:
+	@echo "==> Building all multi-platform binaries (Android, Linux, macOS, Windows)..."
+	./scripts/build_all.sh
 
 build-server:
 	@echo "==> Building adblink-server..."

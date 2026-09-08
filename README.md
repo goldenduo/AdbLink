@@ -61,16 +61,38 @@ When an Android phone is behind NAT, firewalls, or mobile data networks (4G/5G) 
 ### 1. Build Binaries
 
 ```bash
+# Build local binaries
 make build
+
+# Or cross-compile for all supported platforms (Android arm64/x64, Linux, macOS, Windows)
+make build-all
 ```
 
-Artifacts in `bin/`:
-- `bin/adblink-server`: Gateway server
-- `bin/adblink-ctl`: CLI utility
-- `bin/adblink-agent-android-arm64`: 64-bit ARM agent for Android
-- `bin/adblink-agent-android-arm`: 32-bit ARM agent for Android
-- `bin/adblink-agent-android-amd64`: x86_64 emulator agent
-- `bin/adblink-agent-android-386`: 32-bit x86 emulator agent
+Output directory layout in `bin/`:
+
+```text
+bin/
+├── android/                             # Android Native Static Agent
+│   ├── adblink-agent-arm64              # Android ARM64 (aarch64)
+│   ├── adblink-agent-x86_64             # Android x86_64 (x64)
+│   ├── adblink-agent-armv7              # Android 32-bit ARM
+│   └── adblink-agent-x86                # Android 32-bit x86
+├── linux/                               # Linux PC / Server
+│   ├── adblink-server-linux-amd64       # Server (x64)
+│   ├── adblink-server-linux-arm64       # Server (ARM64)
+│   ├── adblink-ctl-linux-amd64          # CLI Tool (x64)
+│   └── adblink-ctl-linux-arm64          # CLI Tool (ARM64)
+├── darwin/                              # macOS (Mac PC)
+│   ├── adblink-server-darwin-arm64      # Server (Apple Silicon M1/M2/M3/M4)
+│   ├── adblink-server-darwin-amd64      # Server (Intel Mac)
+│   ├── adblink-ctl-darwin-arm64         # CLI Tool (Apple Silicon)
+│   └── adblink-ctl-darwin-amd64         # CLI Tool (Intel Mac)
+└── windows/                             # Windows PC
+    ├── adblink-server-windows-amd64.exe # Server (Windows x64)
+    ├── adblink-server-windows-arm64.exe # Server (Windows ARM64)
+    ├── adblink-ctl-windows-amd64.exe    # CLI Tool (Windows x64)
+    └── adblink-ctl-windows-arm64.exe    # CLI Tool (Windows ARM64)
+```
 
 ---
 

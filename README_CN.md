@@ -58,20 +58,41 @@
 
 ### 1. 编译构建
 
-本项目提供一键构建 Makefile，编译服务器、控制端及全架构 Agent：
+本项目提供一键构建 Makefile，支持编译当前平台或者全平台全架构（Android arm64/x64，PC Linux/macOS/Windows）：
 
 ```bash
-# 编译所有组件（生成到 bin/ 目录）
+# 方式一：编译本地常用组件
 make build
+
+# 方式二：一键交叉编译全平台全架构（Android、Linux、macOS、Windows）
+make build-all
 ```
 
-生成文件包括：
-- `bin/adblink-server`：服务端程序
-- `bin/adblink-ctl`：命令行控制端
-- `bin/adblink-agent-android-arm64`：Android ARM64 原生代理
-- `bin/adblink-agent-android-arm`：Android 32位 ARM 原生代理
-- `bin/adblink-agent-android-amd64`：x86_64 模拟器代理
-- `bin/adblink-agent-android-386`：x86 模拟器代理
+编译输出目录及文件清单（`bin/` 目录）：
+
+```text
+bin/
+├── android/                             # 手机端原生静态代理 (Native Agent)
+│   ├── adblink-agent-arm64              # Android ARM64 (aarch64) 真实手机主力
+│   ├── adblink-agent-x86_64             # Android x86_64 (x64) 模拟器/容器
+│   ├── adblink-agent-armv7              # Android 32位 ARM
+│   └── adblink-agent-x86                # Android 32位 x86
+├── linux/                               # Linux PC / 服务器
+│   ├── adblink-server-linux-amd64       # 服务端 (x64)
+│   ├── adblink-server-linux-arm64       # 服务端 (ARM64)
+│   ├── adblink-ctl-linux-amd64          # 控制工具 (x64)
+│   └── adblink-ctl-linux-arm64          # 控制工具 (ARM64)
+├── darwin/                              # macOS (Mac PC)
+│   ├── adblink-server-darwin-arm64      # 服务端 (Apple Silicon M1/M2/M3/M4)
+│   ├── adblink-server-darwin-amd64      # 服务端 (Intel Mac)
+│   ├── adblink-ctl-darwin-arm64         # 控制工具 (Apple Silicon)
+│   └── adblink-ctl-darwin-amd64         # 控制工具 (Intel Mac)
+└── windows/                             # Windows PC
+    ├── adblink-server-windows-amd64.exe # 服务端 (Windows x64)
+    ├── adblink-server-windows-arm64.exe # 服务端 (Windows ARM64)
+    ├── adblink-ctl-windows-amd64.exe    # 控制工具 (Windows x64)
+    └── adblink-ctl-windows-arm64.exe    # 控制工具 (Windows ARM64)
+```
 
 ---
 
