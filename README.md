@@ -129,15 +129,15 @@ Flags:
 #### Option B: Manual deploy via ADB
 
 ```bash
-# Push binary to phone
-adb push bin/adblink-agent-android-arm64 /data/local/tmp/adblink-agent
+# Push binary to phone (select arm64 or x86_64 depending on device)
+adb push bin/android/adblink-agent-arm64 /data/local/tmp/adblink-agent
 adb shell chmod +x /data/local/tmp/adblink-agent
 
-# Run in background
-adb shell "nohup /data/local/tmp/adblink-agent -server <server_ip>:9000 > /data/local/tmp/adblink.log 2>&1 &"
+# Run directly in adb shell (no nohup needed):
+adb shell /data/local/tmp/adblink-agent -server <server_ip>:9000
 
-# Verify log
-adb shell cat /data/local/tmp/adblink.log
+# Or run silently in the background with -d (built-in daemon, no nohup needed):
+adb shell /data/local/tmp/adblink-agent -server <server_ip>:9000 -d
 ```
 
 ---

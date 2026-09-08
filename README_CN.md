@@ -129,20 +129,20 @@ bin/
 ./bin/adblink-ctl push -s <手机serial> -server <服务器IP>:9000
 ```
 
-#### 方式 B：手动推送与运行
+#### 方式 B：手动推送与直接运行
 
 ```bash
-# 1. 将编译好的静态代理程序推送到手机
-adb push bin/adblink-agent-android-arm64 /data/local/tmp/adblink-agent
+# 1. 将编译好的静态代理程序推送到手机（根据手机架构选 arm64 或 x86_64）
+adb push bin/android/adblink-agent-arm64 /data/local/tmp/adblink-agent
 
 # 2. 赋予执行权限
 adb shell chmod +x /data/local/tmp/adblink-agent
 
-# 3. 后台启动代理连接远端服务器
-adb shell "nohup /data/local/tmp/adblink-agent -server <服务器IP>:9000 > /data/local/tmp/adblink.log 2>&1 &"
+# 3. 在 adb shell 中直接运行（无需 nohup 等任何复杂参数）：
+adb shell /data/local/tmp/adblink-agent -server <服务器IP>:9000
 
-# 4. 查看连接日志
-adb shell cat /data/local/tmp/adblink.log
+# 或者若需在后台静默运行，添加 -d 即可（程序自身守护，无需 nohup）：
+adb shell /data/local/tmp/adblink-agent -server <服务器IP>:9000 -d
 ```
 
 成功连接后，日志将输出分配的端口号：

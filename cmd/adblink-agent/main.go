@@ -27,6 +27,8 @@ func main() {
 	autoAdbd := flag.Bool("auto-adbd", true, "Automatically enable and restart local adbd over TCP if unreachable")
 	retry := flag.Duration("retry", 2*time.Second, "Initial reconnect retry backoff")
 	maxRetry := flag.Duration("max-retry", 30*time.Second, "Maximum reconnect retry backoff")
+	daemonMode := flag.Bool("d", false, "Run in background as a daemon process")
+	daemonModeLong := flag.Bool("daemon", false, "Run in background as a daemon process")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 
 	flag.Parse()
@@ -41,6 +43,9 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
+
+	// If background mode requested, daemonize cleanly without nohup
+	maybeDaemonize(*daemonMode || *daemonModeLong)
 
 	logger := log.New(os.Stdout, "[AdbLink-Agent] ", log.LstdFlags|log.Lmsgprefix)
 

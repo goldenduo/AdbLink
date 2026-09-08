@@ -69,13 +69,13 @@ echo "==> Pushing $AGENT_BIN to device $REMOTE_BIN..."
 $ADB_CMD push "$AGENT_BIN" "$REMOTE_BIN"
 $ADB_CMD shell chmod +x "$REMOTE_BIN"
 
-echo "==> Starting adblink-agent in background..."
+echo "==> Starting adblink-agent on device..."
 EXTRA_ARGS=""
 if [[ -n "$TOKEN" ]]; then
     EXTRA_ARGS="-token $TOKEN"
 fi
 
-$ADB_CMD shell "nohup $REMOTE_BIN -server $SERVER_ADDR $EXTRA_ARGS > $REMOTE_LOG 2>&1 &"
+$ADB_CMD shell "$REMOTE_BIN -server $SERVER_ADDR $EXTRA_ARGS -d"
 
 sleep 1
 

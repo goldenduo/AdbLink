@@ -229,19 +229,24 @@ func cmdPush(args []string) {
 	chmodArgs = append(chmodArgs, "shell", "chmod", "+x", remotePath)
 	_ = exec.Command("adb", chmodArgs...).Run()
 
-	fmt.Println("Launching agent in background on device...")
-	agentExec := fmt.Sprintf("nohup %s -server %s", remotePath, *serverAddr)
-	if *token != "" {
-		agentExec += fmt.Sprintf(" -token %s", *token)
-	}
-	agentExec += " > /data/local/tmp/adblink.log 2>&1 &"
-
+	fmt.Println("Launching agent on device...")
 	runArgs := []string{}
 	if *adbSerial != "" {
 		runArgs = append(runArgs, "-s", *adbSerial)
 	}
-	runArgs = append(runArgs, "shell", agentExec)
-	_ = exec.Command("adb", runArgs...).Run()
+	runArgs = append(runArgs, "shell", remotePath, "-server", *serverAddr, "-d")
+	if *token != "" {
+		runArgs = append(runArgs, "-token", *token)
+	}
+
+	out, err = exec.Command("adb", runArgs...).CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start agent: %s\n", string(out))
+		os.Exit(1)
+	}
+	if len(out) > 0 {
+		fmt.Print(string(out))
+	}
 
 	fmt.Println("Agent deployed and running! Check logs with:")
 	fmt.Printf("  adb %s shell cat /data/local/tmp/adblink.log\n", func() string {
