@@ -1,0 +1,23 @@
+# Binaries and build artifacts
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test and coverage artifacts
+*.out
+*.test
+*.prof
+
+# Logs and temp files
+*.log
+/tmp/
+.temp/
+
+# IDE / Editor configs
+.vscode/
+.idea/
+*.swp
+*~

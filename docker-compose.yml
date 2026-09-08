@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  adblink-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: adblink-server
+    restart: unless-stopped
+    ports:
+      # Control port for Android agents
+      - "9000:9000"
+      # Web Dashboard & REST API
+      - "9001:9001"
+      # ADB proxy exposed port range for host adb connect
+      - "55550-55599:55550-55599"
+    environment:
+      - TZ=Asia/Shanghai
+    command:
+      - "-listen"
+      - ":9000"
+      - "-web"
+      - ":9001"
+      - "-host"
+      - "127.0.0.1" # Change to your server public IP/hostname if connecting externally
+      - "-port-min"
+      - "55550"
+      - "-port-max"
+      - "55599"
