@@ -55,6 +55,7 @@ type DeviceSession struct {
 	info             DeviceInfo
 	yamuxSession     *yamux.Session
 	tcpListener      net.Listener
+	controlStream    net.Conn
 	closed           bool
 	closeChan        chan struct{}
 	disconnectTimer  *time.Timer
@@ -229,8 +230,7 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 		Version:       protocol.CurrentProtocolVersion,
 		Status:        protocol.StatusOK,
 		Message:       "Registration successful",
-		AssignedPort:  assignedPort,
-		ServerVersion: "1.1.1",
+		ServerVersion: "1.2.0",
 		AdvertiseHost: s.cfg.AdvertiseHost,
 	}
 	if err := protocol.WriteMsg(conn, resp); err != nil {
@@ -262,6 +262,16 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 	devSession := s.registerDeviceSession(req, remoteAddr, assignedPort, session, adbListener)
 	s.logger.Printf("Device registered: %s (model: %s) -> Port %d. Connect via: adb connect %s:%d",
 		req.DeviceID, req.Model, assignedPort, s.cfg.AdvertiseHost, assignedPort)
+
+	// Accept dedicated control stream from agent
+	go func() {
+		ctrlStream, err := session.AcceptStream()
+		if err == nil {
+			devSession.mu.Lock()
+			devSession.controlStream = ctrlStream
+			devSession.mu.Unlock()
+		}
+	}()
 
 	// Run ADB forwarding loop
 	go s.runAdbForwardingLoop(devSession)
@@ -516,7 +526,7 @@ func (s *Server) GetDevice(id string) (DeviceInfo, bool) {
 	return info, true
 }
 
-// DisconnectDevice forces a device disconnection.
+// DisconnectDevice forces a device disconnection and commands the agent to exit cleanly.
 func (s *Server) DisconnectDevice(id string) error {
 	s.mu.RLock()
 	dev, ok := s.devices[id]
@@ -527,10 +537,19 @@ func (s *Server) DisconnectDevice(id string) error {
 	}
 
 	dev.mu.Lock()
-	if dev.yamuxSession != nil {
-		_ = dev.yamuxSession.Close()
+	if dev.controlStream != nil {
+		s.logger.Printf("Sending STOP command to agent on device %s...", id)
+		_, _ = dev.controlStream.Write([]byte("STOP\n"))
+		_ = dev.controlStream.Close()
+		dev.controlStream = nil
 	}
 	dev.mu.Unlock()
+
+	// Wait briefly for agent to receive command and exit gracefully
+	time.Sleep(250 * time.Millisecond)
+
+	s.EvictDevice(id)
+	s.portPool.Release(dev.info.AssignedPort, id)
 	return nil
 }
 
@@ -563,11 +582,14 @@ func (s *Server) EvictDevice(deviceID string) {
 		_ = dev.yamuxSession.Close()
 		dev.yamuxSession = nil
 	}
+	if dev.controlStream != nil {
+		_ = dev.controlStream.Close()
+		dev.controlStream = nil
+	}
 	if dev.disconnectTimer != nil {
 		dev.disconnectTimer.Stop()
 		dev.disconnectTimer = nil
 	}
-	dev.mu.Unlock()
 
 	// Manually trigger port release to ensure PortPool state is updated before the new connection acquires it.
 	// The new connection will immediately reclaim this reservation in PortPool.Acquire.

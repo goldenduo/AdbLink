@@ -117,3 +117,85 @@ func TestAgentServerTunnel(t *testing.T) {
 		t.Fatalf("unexpected reply: got %s, want prefix %s", string(replyBuf[:n]), string(expectedPrefix))
 	}
 }
+
+func TestRemoteDisconnectStopsAgent(t *testing.T) {
+	// 1. Start mock local adbd
+	mockAdbdListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start mock adbd: %v", err)
+	}
+	defer mockAdbdListener.Close()
+	mockAdbdAddr := mockAdbdListener.Addr().String()
+
+	// 2. Start AdbLink Server
+	serverCfg := server.Config{
+		ListenAddr:    "127.0.0.1:0",
+		AdvertiseHost: "127.0.0.1",
+		PortMin:       46000,
+		PortMax:       46010,
+		Logger:        log.New(io.Discard, "", 0),
+	}
+	srv, err := server.NewServer(serverCfg)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed to start server: %v", err)
+	}
+	defer srv.Stop()
+
+	// 3. Connect Agent
+	agentCfg := Config{
+		ServerAddr:     srv.GetListenAddr(),
+		DeviceID:       "test-disconnect-device",
+		Model:          "DisconnectPhone",
+		AndroidVersion: "15",
+		LocalAdbAddr:   mockAdbdAddr,
+		Logger:         log.New(io.Discard, "", 0),
+	}
+	ag := NewAgent(agentCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	agentDone := make(chan struct{})
+	go func() {
+		_ = ag.Run(ctx)
+		close(agentDone)
+	}()
+
+	// Wait for device to appear in server registry
+	var found bool
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		devInfo, ok := srv.GetDevice("test-disconnect-device")
+		if ok && devInfo.Status == "ONLINE" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("device did not register online in time")
+	}
+
+	// 4. Trigger disconnect from server side
+	if err := srv.DisconnectDevice("test-disconnect-device"); err != nil {
+		t.Fatalf("DisconnectDevice failed: %v", err)
+	}
+
+	// 5. Verify agent cleanly terminates its Run() loop and does NOT reconnect
+	select {
+	case <-agentDone:
+		// Successfully terminated!
+	case <-time.After(3 * time.Second):
+		t.Fatalf("agent did not exit within timeout after server disconnect")
+	}
+
+	// Wait 1 second to ensure agent does not re-register
+	time.Sleep(1 * time.Second)
+	_, stillExists := srv.GetDevice("test-disconnect-device")
+	if stillExists {
+		t.Fatalf("device still exists or reconnected after disconnect")
+	}
+}

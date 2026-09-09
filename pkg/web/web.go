@@ -269,10 +269,12 @@ function copyCmd(cmd) {
 }
 
 function disconnectDevice(id) {
-  if (!confirm('Disconnect device ' + id + '?')) return;
+  if (!confirm('Disconnect and stop agent on device ' + id + '?\nThis will terminate the adblink-agent process on the phone.')) return;
   fetch('/api/v1/devices/' + encodeURIComponent(id) + '/disconnect', { method: 'POST' })
     .then(r => r.json())
-    .then(() => loadDevices());
+    .then(() => {
+      setTimeout(loadDevices, 400);
+    });
 }
 
 function loadDevices() {
@@ -312,7 +314,7 @@ function loadDevices() {
         html += '<td><div class="code-box"><span>' + connectCmd + '</span><button class="btn btn-copy" onclick="copyCmd(\'' + connectCmd + '\')">Copy</button></div></td>';
         html += '<td>' + (dev.active_streams || 0) + '</td>';
         html += '<td>' + formatBytes(dev.bytes_received || 0) + ' / ' + formatBytes(dev.bytes_sent || 0) + '</td>';
-        html += '<td><button class="btn btn-danger" onclick="disconnectDevice(\'' + dev.device_id + '\')">Disconnect</button></td>';
+        html += '<td><button class="btn btn-danger" title="Disconnect and stop agent process on phone" onclick="disconnectDevice(\'' + dev.device_id + '\')">Disconnect</button></td>';
         html += '</tr>';
       });
 

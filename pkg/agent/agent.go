@@ -1,13 +1,16 @@
 package agent
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
+	rand "math/rand/v2"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +18,9 @@ import (
 	"github.com/goldenduo/AdbLink/pkg/tunnel"
 	"github.com/hashicorp/yamux"
 )
+
+// ErrRemoteStop is returned when the remote server sends a STOP command.
+var ErrRemoteStop = errors.New("remote stop requested by server")
 
 // Config configures the AdbLink Agent (Android native proxy).
 type Config struct {
@@ -35,12 +41,13 @@ type Config struct {
 
 // Agent is the native proxy running on Android.
 type Agent struct {
-	cfg        Config
-	logger     *log.Logger
-	mu         sync.Mutex
-	session    *yamux.Session
-	closed     bool
-	cancelFunc context.CancelFunc
+	cfg           Config
+	logger        *log.Logger
+	mu            sync.Mutex
+	session       *yamux.Session
+	closed        bool
+	remoteStopped bool
+	cancelFunc    context.CancelFunc
 }
 
 // NewAgent creates a new Agent instance.
@@ -109,10 +116,18 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 
 		err := a.connectAndServe(ctx)
+		a.mu.Lock()
+		stopped := a.remoteStopped || a.closed
+		a.mu.Unlock()
+
+		if errors.Is(err, ErrRemoteStop) || stopped {
+			a.logger.Printf("[AdbLink-Agent] Remote stop received from server. Agent exiting gracefully.")
+			return nil
+		}
+
 		if err != nil {
 			a.logger.Printf("Connection error: %v", err)
 		}
-
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -120,7 +135,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 
 		// Exponential backoff with jitter
-		jitter := time.Duration(rand.Int63n(int64(backoff / 2)))
+		jitter := time.Duration(rand.Int64N(int64(backoff / 2)))
 		sleepDuration := backoff + jitter
 		a.logger.Printf("Reconnecting to %s in %v...", a.cfg.ServerAddr, sleepDuration)
 
@@ -160,7 +175,7 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		AndroidVersion: a.cfg.AndroidVersion,
 		Token:          a.cfg.Token,
 		RequestedPort:  a.cfg.RequestedPort,
-		ClientVersion:  "1.1.1",
+		ClientVersion:  "1.2.0",
 	}
 
 	if err := protocol.WriteMsg(conn, req); err != nil {
@@ -194,6 +209,18 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 	a.session = session
 	a.mu.Unlock()
 
+	// Open dedicated control stream to server
+	controlStream, err := session.OpenStream()
+	if err != nil {
+		return fmt.Errorf("failed to open control stream: %w", err)
+	}
+	defer controlStream.Close()
+
+	controlErrChan := make(chan error, 1)
+	go func() {
+		controlErrChan <- a.listenControlCommands(controlStream)
+	}()
+
 	// Wait for context cancellation or stream loop completion
 	streamErrChan := make(chan error, 1)
 	go func() {
@@ -204,11 +231,22 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 	case <-ctx.Done():
 		_ = session.Close()
 		return ctx.Err()
+	case err := <-controlErrChan:
+		if errors.Is(err, ErrRemoteStop) {
+			_ = session.Close()
+			return err
+		}
+		// Other control errors: keep session alive or wait for stream errors
+		select {
+		case err := <-streamErrChan:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	case err := <-streamErrChan:
 		return err
 	}
 }
-
 // acceptStreams listens for incoming reverse streams from the server and forwards to local adbd.
 func (a *Agent) acceptStreams(ctx context.Context, session *yamux.Session) error {
 	for {
@@ -257,5 +295,26 @@ func (a *Agent) Stop() {
 	}
 	if a.session != nil {
 		_ = a.session.Close()
+	}
+}
+
+// listenControlCommands reads management commands from the server control stream.
+func (a *Agent) listenControlCommands(stream net.Conn) error {
+	reader := bufio.NewReader(stream)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		cmd := strings.TrimSpace(line)
+		switch cmd {
+		case "STOP":
+			a.logger.Printf("[AdbLink-Agent] Received STOP command from server. Shutting down...")
+			a.mu.Lock()
+			a.remoteStopped = true
+			a.mu.Unlock()
+			a.Stop()
+			return ErrRemoteStop
+		}
 	}
 }

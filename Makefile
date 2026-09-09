@@ -1,6 +1,6 @@
 .PHONY: all build build-all build-agent build-server build-ctl build-ctl-all test test-e2e clean docker-build help
 
-VERSION ?= 1.1.1
+VERSION ?= 1.2.0
 BIN_DIR ?= bin
 LDFLAGS = -s -w -X main.version=$(VERSION)
 
