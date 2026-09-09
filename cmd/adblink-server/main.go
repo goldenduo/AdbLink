@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	version = "1.2.0"
+	version = "1.3.0"
 )
 
 func main() {
@@ -25,6 +25,7 @@ func main() {
 	portMax := flag.Int("port-max", 55599, "Maximum port to assign for ADB connections")
 	token := flag.String("token", "", "Optional authentication token required from agents")
 	gracePeriod := flag.Duration("grace", 30*time.Second, "Grace period to hold port reservation on disconnect")
+	dataDir := flag.String("data-dir", "data", "Directory to store persistent data and auth credentials")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 
 	flag.Parse()
@@ -65,7 +66,7 @@ func main() {
 
 	var webSrv *web.WebServer
 	if *webAddr != "" {
-		webSrv = web.NewWebServer(srv, *webAddr, logger)
+		webSrv = web.NewWebServer(srv, *webAddr, logger, *dataDir, *token)
 		if err := webSrv.Start(); err != nil {
 			logger.Printf("Failed to start web dashboard on %s: %v", *webAddr, err)
 		}

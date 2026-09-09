@@ -175,7 +175,7 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		AndroidVersion: a.cfg.AndroidVersion,
 		Token:          a.cfg.Token,
 		RequestedPort:  a.cfg.RequestedPort,
-		ClientVersion:  "1.2.0",
+		ClientVersion:  "1.3.0",
 	}
 
 	if err := protocol.WriteMsg(conn, req); err != nil {

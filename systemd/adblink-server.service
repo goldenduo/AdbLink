@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/adblink-server -listen :8888 -web :9999 -host 127.0.0.1 -port-min 55550 -port-max 55599
+ExecStart=/usr/local/bin/adblink-server -listen :8888 -web :9999 -host 127.0.0.1 -port-min 55550 -port-max 55599 -data-dir /var/lib/adblink
 Restart=always
 RestartSec=5s
 LimitNOFILE=65536
