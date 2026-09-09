@@ -3,7 +3,7 @@ set -euo pipefail
 
 # scripts/build_all.sh: Cross-compile AdbLink for Android (arm64, x64), Linux, macOS, and Windows
 
-VERSION="${VERSION:-1.1.0}"
+VERSION="${VERSION:-1.1.1}"
 LDFLAGS="-s -w -X main.version=${VERSION}"
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

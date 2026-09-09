@@ -15,7 +15,7 @@ import (
 	"github.com/goldenduo/AdbLink/pkg/server"
 )
 
-var version = "1.1.0"
+var version = "1.1.1"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -258,18 +258,19 @@ func cmdPush(args []string) {
 	chmodArgs = append(chmodArgs, "shell", "chmod", "+x", remotePath)
 	_ = exec.Command("adb", chmodArgs...).Run()
 
-	// Ensure device adbd is running in TCP mode on port 5555 (critical for non-root real Android phones)
-	fmt.Println("Ensuring device adbd is in TCP mode (adb tcpip 5555)...")
-	tcpipArgs := []string{}
-	if *adbSerial != "" {
-		tcpipArgs = append(tcpipArgs, "-s", *adbSerial)
+	// Ensure device adbd is running in TCP mode on port 5555 (critical for non-root real Android phones connected via USB)
+	if isUSBDevice(*adbSerial) {
+		fmt.Println("Ensuring device adbd is in TCP mode (adb tcpip 5555)...")
+		tcpipArgs := []string{}
+		if *adbSerial != "" {
+			tcpipArgs = append(tcpipArgs, "-s", *adbSerial)
+		}
+		tcpipArgs = append(tcpipArgs, "tcpip", "5555")
+		if tcpipOut, err := exec.Command("adb", tcpipArgs...).CombinedOutput(); err != nil {
+			fmt.Printf("Notice: adb tcpip 5555: %s\n", strings.TrimSpace(string(tcpipOut)))
+		}
+		time.Sleep(1 * time.Second)
 	}
-	tcpipArgs = append(tcpipArgs, "tcpip", "5555")
-	if tcpipOut, err := exec.Command("adb", tcpipArgs...).CombinedOutput(); err != nil {
-		fmt.Printf("Notice: adb tcpip 5555: %s\n", strings.TrimSpace(string(tcpipOut)))
-	}
-	time.Sleep(1 * time.Second)
-
 	fmt.Println("Launching agent on device...")
 	runArgs := []string{}
 	if *adbSerial != "" {
@@ -410,16 +411,20 @@ func cmdAuto(args []string) {
 	}
 	fmt.Printf("[1/5] Target device: %s (%s, ABI: %s)\n", model, targetSerial, abi)
 
-	// Step 2: Enable TCP mode for physical devices (adb tcpip 5555)
-	fmt.Print("[2/5] Ensuring TCP mode on device (adb tcpip 5555)... ")
-	_ = exec.Command("adb", "-s", targetSerial, "tcpip", "5555").Run()
-	time.Sleep(1 * time.Second)
-	// If server address is localhost/127.0.0.1, configure adb reverse so USB-connected device can reach host server
-	serverHost, serverPort, _ := net.SplitHostPort(*serverAddr)
-	if serverHost == "127.0.0.1" || serverHost == "localhost" {
-		_ = exec.Command("adb", "-s", targetSerial, "reverse", fmt.Sprintf("tcp:%s", serverPort), fmt.Sprintf("tcp:%s", serverPort)).Run()
+	// Step 2: Enable TCP mode for physical USB devices (adb tcpip 5555)
+	if isUSBDevice(targetSerial) {
+		fmt.Print("[2/5] Ensuring TCP mode on USB device (adb tcpip 5555)... ")
+		_ = exec.Command("adb", "-s", targetSerial, "tcpip", "5555").Run()
+		time.Sleep(1 * time.Second)
+		// If server address is localhost/127.0.0.1, configure adb reverse so USB-connected device can reach host server
+		serverHost, serverPort, _ := net.SplitHostPort(*serverAddr)
+		if serverHost == "127.0.0.1" || serverHost == "localhost" {
+			_ = exec.Command("adb", "-s", targetSerial, "reverse", fmt.Sprintf("tcp:%s", serverPort), fmt.Sprintf("tcp:%s", serverPort)).Run()
+		}
+		fmt.Println("Done")
+	} else {
+		fmt.Println("[2/5] Device is connected wirelessly/network, skipping 'adb tcpip' to preserve connection.")
 	}
-	fmt.Println("Done")
 	// Step 3: Find agent binary
 	binPath := *agentBin
 	if binPath == "" {
@@ -433,6 +438,14 @@ func cmdAuto(args []string) {
 	fmt.Printf("[3/5] Deploying agent (%s)... ", filepath.Base(binPath))
 
 	remotePath := "/data/local/tmp/adblink-agent"
+	// Ensure device is responsive
+	for range 3 {
+		if stateErr := exec.Command("adb", "-s", targetSerial, "get-state").Run(); stateErr == nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
 	if out, err := exec.Command("adb", "-s", targetSerial, "push", binPath, remotePath).CombinedOutput(); err != nil {
 		fmt.Println("Failed")
 		fmt.Fprintf(os.Stderr, "adb push error: %s\n", string(out))
@@ -526,14 +539,27 @@ func detectTargetDevice(specifiedSerial string) (serial, model, abi string, err 
 				filtered = append(filtered, c)
 			}
 		}
+		if len(filtered) == 0 {
+			filtered = candidates
+		}
 
-		if len(filtered) > 0 {
-			serial = filtered[0]
+		// Prioritize physical USB devices over wireless/mDNS/network devices
+		var usbDevices []string
+		var netDevices []string
+		for _, dev := range filtered {
+			if isUSBDevice(dev) {
+				usbDevices = append(usbDevices, dev)
+			} else {
+				netDevices = append(netDevices, dev)
+			}
+		}
+
+		if len(usbDevices) > 0 {
+			serial = usbDevices[0]
 		} else {
-			serial = candidates[0]
+			serial = netDevices[0]
 		}
 	}
-
 	mOut, _ := exec.Command("adb", "-s", serial, "shell", "getprop", "ro.product.model").Output()
 	model = strings.TrimSpace(string(mOut))
 	if model == "" {
@@ -581,4 +607,16 @@ func pollDeviceConnectTarget(webAddr, serial, model string, maxAttempts int) str
 		time.Sleep(1 * time.Second)
 	}
 	return ""
+}
+
+// isUSBDevice checks if the ADB device serial represents a physical USB connection,
+// as opposed to a network connection (IP:Port) or mDNS TLS service record (._tcp).
+func isUSBDevice(serial string) bool {
+	if serial == "" {
+		return true // Default to true if unspecified
+	}
+	if strings.Contains(serial, ":") || strings.Contains(serial, "._tcp") || strings.Contains(serial, "._adb") {
+		return false
+	}
+	return true
 }

@@ -230,7 +230,7 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 		Status:        protocol.StatusOK,
 		Message:       "Registration successful",
 		AssignedPort:  assignedPort,
-		ServerVersion: "1.1.0",
+		ServerVersion: "1.1.1",
 		AdvertiseHost: s.cfg.AdvertiseHost,
 	}
 	if err := protocol.WriteMsg(conn, resp); err != nil {
