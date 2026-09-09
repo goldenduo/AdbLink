@@ -1,6 +1,6 @@
-.PHONY: all build build-all build-agent build-server build-ctl test test-e2e clean docker-build help
+.PHONY: all build build-all build-agent build-server build-ctl build-ctl-all test test-e2e clean docker-build help
 
-VERSION ?= 1.0.0
+VERSION ?= 1.1.0
 BIN_DIR ?= bin
 LDFLAGS = -s -w -X main.version=$(VERSION)
 
@@ -21,6 +21,16 @@ build-ctl:
 	@echo "==> Building adblink-ctl..."
 	mkdir -p $(BIN_DIR)
 	go build -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/adblink-ctl ./cmd/adblink-ctl
+build-ctl-all:
+	@echo "==> Building adblink-ctl for all PC platforms (Linux, macOS, Windows)..."
+	mkdir -p $(BIN_DIR)/linux $(BIN_DIR)/darwin $(BIN_DIR)/windows
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/linux/adblink-ctl-linux-amd64 ./cmd/adblink-ctl
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/linux/adblink-ctl-linux-arm64 ./cmd/adblink-ctl
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/darwin/adblink-ctl-darwin-arm64 ./cmd/adblink-ctl
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/darwin/adblink-ctl-darwin-amd64 ./cmd/adblink-ctl
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/windows/adblink-ctl-windows-amd64.exe ./cmd/adblink-ctl
+	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/windows/adblink-ctl-windows-arm64.exe ./cmd/adblink-ctl
+	@echo "==> Multi-platform adblink-ctl binaries built in $(BIN_DIR)/"
 
 build-agent:
 	@echo "==> Building adblink-agent for Android architectures..."
@@ -51,8 +61,8 @@ help:
 	@echo "AdbLink Makefile targets:"
 	@echo "  build         - Build server, ctl, and all multi-arch agent binaries"
 	@echo "  build-server  - Build adblink-server"
-	@echo "  build-ctl     - Build adblink-ctl CLI"
-	@echo "  build-agent   - Cross-compile static agent for arm64, arm, amd64, 386"
+	@echo "  build-ctl     - Build adblink-ctl CLI for current host"
+	@echo "  build-ctl-all - Cross-compile adblink-ctl for Linux, macOS, and Windows"
 	@echo "  test          - Run all Go package tests with race detector"
 	@echo "  test-e2e      - Run end-to-end integration test"
 	@echo "  docker-build  - Build Docker container for adblink-server"

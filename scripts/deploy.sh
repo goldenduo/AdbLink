@@ -62,6 +62,10 @@ REMOTE_DIR="/data/local/tmp"
 REMOTE_BIN="$REMOTE_DIR/adblink-agent"
 REMOTE_LOG="$REMOTE_DIR/adblink.log"
 
+echo "==> Ensuring device adbd is listening in TCP mode (port 5555)..."
+$ADB_CMD tcpip 5555 2>/dev/null || true
+sleep 1
+
 echo "==> Stopping any previous agent on device..."
 $ADB_CMD shell "pkill -9 adblink-agent 2>/dev/null || true"
 

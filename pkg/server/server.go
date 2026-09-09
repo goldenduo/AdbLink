@@ -203,6 +203,8 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 	if req.DeviceID == "" {
 		req.DeviceID = fmt.Sprintf("device-%d", time.Now().UnixNano())
 	}
+	// Evict any existing session for this device to prevent port bind conflicts
+	s.EvictDevice(req.DeviceID)
 
 	// Acquire port
 	assignedPort, err := s.portPool.Acquire(req.RequestedPort, req.DeviceID)
@@ -228,7 +230,7 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 		Status:        protocol.StatusOK,
 		Message:       "Registration successful",
 		AssignedPort:  assignedPort,
-		ServerVersion: "1.0.0",
+		ServerVersion: "1.1.0",
 		AdvertiseHost: s.cfg.AdvertiseHost,
 	}
 	if err := protocol.WriteMsg(conn, resp); err != nil {
@@ -412,14 +414,13 @@ func (s *Server) monitorSession(dev *DeviceSession) {
 		}
 	}
 }
-
-// handleDeviceDisconnected handles when a device disconnects.
 func (s *Server) handleDeviceDisconnected(dev *DeviceSession) {
 	dev.mu.Lock()
 	if dev.closed {
 		dev.mu.Unlock()
 		return
 	}
+	dev.closed = true
 	dev.info.Status = "DISCONNECTED"
 	if dev.tcpListener != nil {
 		_ = dev.tcpListener.Close()
@@ -431,6 +432,15 @@ func (s *Server) handleDeviceDisconnected(dev *DeviceSession) {
 	}
 	dev.mu.Unlock()
 
+
+	// Verify this session is still the active one before releasing its port
+	s.mu.RLock()
+	currentDev, exists := s.devices[dev.info.DeviceID]
+	s.mu.RUnlock()
+	if exists && currentDev != dev {
+		s.logger.Printf("Skipping port release for %s: a new session has already taken over", dev.info.DeviceID)
+		return
+	}
 	s.logger.Printf("Device %s disconnected. Keeping port %d reserved for %v grace period",
 		dev.info.DeviceID, dev.info.AssignedPort, s.cfg.GracePeriod)
 
@@ -522,6 +532,48 @@ func (s *Server) DisconnectDevice(id string) error {
 	}
 	dev.mu.Unlock()
 	return nil
+}
+
+func (s *Server) EvictDevice(deviceID string) {
+	s.mu.Lock()
+	dev, exists := s.devices[deviceID]
+	if exists {
+		delete(s.devices, deviceID)
+	}
+	s.mu.Unlock()
+
+	if !exists {
+		return
+	}
+
+	dev.mu.Lock()
+	if dev.closed {
+		dev.mu.Unlock()
+		return
+	}
+	dev.closed = true
+	dev.info.Status = "DISCONNECTED"
+	
+	// Close resources to free OS ports
+	if dev.tcpListener != nil {
+		_ = dev.tcpListener.Close()
+		dev.tcpListener = nil
+	}
+	if dev.yamuxSession != nil {
+		_ = dev.yamuxSession.Close()
+		dev.yamuxSession = nil
+	}
+	if dev.disconnectTimer != nil {
+		dev.disconnectTimer.Stop()
+		dev.disconnectTimer = nil
+	}
+	dev.mu.Unlock()
+
+	// Manually trigger port release to ensure PortPool state is updated before the new connection acquires it.
+	// The new connection will immediately reclaim this reservation in PortPool.Acquire.
+	s.portPool.ReleaseWithGracePeriod(dev.info.AssignedPort, deviceID, s.cfg.GracePeriod)
+
+	s.logger.Printf("Evicted previous session for device %s to allow rapid reconnect", deviceID)
 }
 
 // Stop shuts down the server and all device listeners.

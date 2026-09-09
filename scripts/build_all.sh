@@ -3,7 +3,7 @@ set -euo pipefail
 
 # scripts/build_all.sh: Cross-compile AdbLink for Android (arm64, x64), Linux, macOS, and Windows
 
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-1.1.0}"
 LDFLAGS="-s -w -X main.version=${VERSION}"
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -68,8 +68,12 @@ CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o "${BIN
 CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o "${BIN_DIR}/windows/adblink-ctl-windows-arm64.exe" ./cmd/adblink-ctl
 
 # Also maintain root bin links for convenience and backwards compatibility
-cp "${BIN_DIR}/linux/adblink-server-linux-arm64" "${BIN_DIR}/adblink-server"
-cp "${BIN_DIR}/linux/adblink-ctl-linux-arm64" "${BIN_DIR}/adblink-ctl"
+HOST_OS="$(go env GOOS)"
+HOST_ARCH="$(go env GOARCH)"
+if [[ -f "${BIN_DIR}/${HOST_OS}/adblink-server-${HOST_OS}-${HOST_ARCH}" ]]; then
+    cp "${BIN_DIR}/${HOST_OS}/adblink-server-${HOST_OS}-${HOST_ARCH}" "${BIN_DIR}/adblink-server"
+    cp "${BIN_DIR}/${HOST_OS}/adblink-ctl-${HOST_OS}-${HOST_ARCH}" "${BIN_DIR}/adblink-ctl"
+fi
 cp "${BIN_DIR}/android/adblink-agent-arm64" "${BIN_DIR}/adblink-agent-android-arm64"
 cp "${BIN_DIR}/android/adblink-agent-x86_64" "${BIN_DIR}/adblink-agent-android-amd64"
 cp "${BIN_DIR}/android/adblink-agent-armv7" "${BIN_DIR}/adblink-agent-android-arm"
