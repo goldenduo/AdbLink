@@ -9,6 +9,17 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
+const (
+	// Yamux writes share the underlying TCP connection with all ADB streams.
+	// A congested mobile link can take longer than the yamux default to accept a
+	// frame, so the write safety valve must not be treated as an ADB operation
+	// timeout.
+	yamuxConnectionWriteTimeout = 2 * time.Minute
+	// Keep a long, but bounded, half-close grace period for commands such as
+	// adb install, which may finish the upload before returning the result.
+	yamuxStreamCloseTimeout = 5 * time.Minute
+)
+
 var bufPool = sync.Pool{
 	New: func() interface{} {
 		// 64KB buffer for high throughput adb push/pull
@@ -20,15 +31,29 @@ var bufPool = sync.Pool{
 // DefaultYamuxConfig returns a tuned Yamux configuration for high-throughput ADB tunneling.
 func DefaultYamuxConfig() *yamux.Config {
 	cfg := yamux.DefaultConfig()
-	cfg.EnableKeepAlive = true
-	cfg.KeepAliveInterval = 15 * time.Second
-	cfg.ConnectionWriteTimeout = 15 * time.Second
+	// Yamux's keepalive closes the whole session after one missed Ping. A Ping
+	// competes with a large ADB transfer on the same lossy TCP connection, so it
+	// can falsely disconnect an otherwise healthy stream. TCP keepalive is
+	// configured on the underlying connection instead.
+	cfg.EnableKeepAlive = false
+	cfg.ConnectionWriteTimeout = yamuxConnectionWriteTimeout
 	// Allow 1MB window size for fast file transfer (adb push/pull)
 	cfg.MaxStreamWindowSize = 1024 * 1024
 	cfg.StreamOpenTimeout = 30 * time.Second
-	cfg.StreamCloseTimeout = 30 * time.Second
+	cfg.StreamCloseTimeout = yamuxStreamCloseTimeout
 	cfg.LogOutput = io.Discard
 	return cfg
+}
+
+// ConfigureTCPConn enables transport-level liveness without imposing an
+// application-level deadline on ADB data. It is safe to call for any net.Conn.
+func ConfigureTCPConn(conn net.Conn) {
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	_ = tcpConn.SetKeepAlive(true)
+	_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
 }
 
 type closeWriter interface {

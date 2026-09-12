@@ -24,19 +24,19 @@ var ErrRemoteStop = errors.New("remote stop requested by server")
 
 // Config configures the AdbLink Agent (Android native proxy).
 type Config struct {
-	ServerAddr         string        // Remote server address, e.g. "1.2.3.4:9000"
-	DeviceID           string        // Unique device serial or ID (auto-detected if empty)
-	Model              string        // Device model (auto-detected if empty)
-	Manufacturer       string        // Device manufacturer
-	AndroidVersion     string        // Android OS version
-	LocalAdbAddr       string        // Local adbd address (default "127.0.0.1:5555")
-	RequestedPort      int           // Desired port on server (0 = auto)
-	Token              string        // Authentication token
-	AutoAdbd           bool          // Automatically enable adbd TCP port
-	RetryInterval      time.Duration // Initial reconnect backoff
-	MaxRetryInterval   time.Duration // Maximum reconnect backoff
-	DialTimeout        time.Duration // Server dial timeout
-	Logger             *log.Logger
+	ServerAddr       string        // Remote server address, e.g. "1.2.3.4:9000"
+	DeviceID         string        // Unique device serial or ID (auto-detected if empty)
+	Model            string        // Device model (auto-detected if empty)
+	Manufacturer     string        // Device manufacturer
+	AndroidVersion   string        // Android OS version
+	LocalAdbAddr     string        // Local adbd address (default "127.0.0.1:5555")
+	RequestedPort    int           // Desired port on server (0 = auto)
+	Token            string        // Authentication token
+	AutoAdbd         bool          // Automatically enable adbd TCP port
+	RetryInterval    time.Duration // Initial reconnect backoff
+	MaxRetryInterval time.Duration // Maximum reconnect backoff
+	DialTimeout      time.Duration // Server dial timeout
+	Logger           *log.Logger
 }
 
 // Agent is the native proxy running on Android.
@@ -162,6 +162,7 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		return fmt.Errorf("dial server failed: %w", err)
 	}
 	defer conn.Close()
+	tunnel.ConfigureTCPConn(conn)
 
 	// Perform registration handshake
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
@@ -247,6 +248,7 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		return err
 	}
 }
+
 // acceptStreams listens for incoming reverse streams from the server and forwards to local adbd.
 func (a *Agent) acceptStreams(ctx context.Context, session *yamux.Session) error {
 	for {

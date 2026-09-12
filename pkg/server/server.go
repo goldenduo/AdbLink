@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -165,6 +166,7 @@ func (s *Server) acceptLoop() {
 func (s *Server) handleAgentConn(conn net.Conn) {
 	remoteAddr := conn.RemoteAddr().String()
 	s.logger.Printf("Incoming connection from %s", remoteAddr)
+	tunnel.ConfigureTCPConn(conn)
 
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
@@ -371,7 +373,7 @@ func (s *Server) forwardAdbConnection(dev *DeviceSession, clientConn net.Conn) {
 		return
 	}
 
-	_, _, _ = tunnel.ForwardWithCallbacks(
+	n1, n2, forwardErr := tunnel.ForwardWithCallbacks(
 		clientConn, stream,
 		func(n int64) {
 			atomic.AddInt64(&dev.bytesReceived, n)
@@ -380,6 +382,10 @@ func (s *Server) forwardAdbConnection(dev *DeviceSession, clientConn net.Conn) {
 			atomic.AddInt64(&dev.bytesSent, n)
 		},
 	)
+	if forwardErr != nil && !errors.Is(forwardErr, io.EOF) && !errors.Is(forwardErr, net.ErrClosed) {
+		s.logger.Printf("ADB stream for device %s ended with error: %v (host->phone: %d, phone->host: %d)",
+			dev.info.DeviceID, forwardErr, n1, n2)
+	}
 
 	dev.mu.Lock()
 	dev.info.LastSeenAt = time.Now()
@@ -388,40 +394,26 @@ func (s *Server) forwardAdbConnection(dev *DeviceSession, clientConn net.Conn) {
 
 // monitorSession detects disconnection and manages the grace period.
 func (s *Server) monitorSession(dev *DeviceSession) {
-	// yamux.Session doesn't have an error channel, but calling OpenStream or Ping or waiting on closed state
-	// We can periodically ping or wait for session close
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	dev.mu.RLock()
+	session := dev.yamuxSession
+	closed := dev.closed
+	dev.mu.RUnlock()
 
-	for {
-		select {
-		case <-s.shutdownChan:
-			return
-		case <-dev.closeChan:
-			return
-		case <-ticker.C:
-			dev.mu.RLock()
-			session := dev.yamuxSession
-			closed := dev.closed
-			dev.mu.RUnlock()
+	if closed || session == nil || session.IsClosed() {
+		s.handleDeviceDisconnected(dev)
+		return
+	}
 
-			if closed || session == nil || session.IsClosed() {
-				s.handleDeviceDisconnected(dev)
-				return
-			}
-
-			// Ping peer to verify liveness
-			_, err := session.Ping()
-			if err != nil {
-				s.logger.Printf("Ping failed for device %s: %v, marking disconnected", dev.info.DeviceID, err)
-				s.handleDeviceDisconnected(dev)
-				return
-			}
-
-			dev.mu.Lock()
-			dev.info.LastSeenAt = time.Now()
-			dev.mu.Unlock()
-		}
+	// The yamux session closes its CloseChan when the underlying TCP connection
+	// fails. Do not send application Pings here: a Ping shares the same ordered
+	// TCP stream as an active adb push and a transient write delay must not tear
+	// down the device listener and every in-flight ADB operation.
+	select {
+	case <-s.shutdownChan:
+	case <-dev.closeChan:
+	case <-session.CloseChan():
+		s.logger.Printf("Yamux session closed for device %s", dev.info.DeviceID)
+		s.handleDeviceDisconnected(dev)
 	}
 }
 func (s *Server) handleDeviceDisconnected(dev *DeviceSession) {
@@ -441,7 +433,6 @@ func (s *Server) handleDeviceDisconnected(dev *DeviceSession) {
 		dev.yamuxSession = nil
 	}
 	dev.mu.Unlock()
-
 
 	// Verify this session is still the active one before releasing its port
 	s.mu.RLock()
@@ -572,7 +563,7 @@ func (s *Server) EvictDevice(deviceID string) {
 	}
 	dev.closed = true
 	dev.info.Status = "DISCONNECTED"
-	
+
 	// Close resources to free OS ports
 	if dev.tcpListener != nil {
 		_ = dev.tcpListener.Close()

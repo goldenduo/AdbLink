@@ -112,3 +112,16 @@ func TestYamuxLoopback(t *testing.T) {
 		t.Fatalf("data mismatch: got %s, want %s", string(buf), string(testData))
 	}
 }
+
+func TestDefaultYamuxConfigDoesNotKillSlowADBStreams(t *testing.T) {
+	cfg := DefaultYamuxConfig()
+	if cfg.EnableKeepAlive {
+		t.Fatal("yamux keepalive must not close an active ADB session after one missed ping")
+	}
+	if cfg.ConnectionWriteTimeout < 2*time.Minute {
+		t.Fatalf("connection write timeout is too short: %v", cfg.ConnectionWriteTimeout)
+	}
+	if cfg.StreamCloseTimeout < 5*time.Minute {
+		t.Fatalf("stream close timeout is too short: %v", cfg.StreamCloseTimeout)
+	}
+}
