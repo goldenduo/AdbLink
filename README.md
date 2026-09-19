@@ -49,8 +49,10 @@ When an Android phone is behind NAT, firewalls, or mobile data networks (4G/5G) 
 - **NAT/Firewall Traversal**: The phone only needs outbound Internet connectivity (cellular or WiFi). No public IP or router port forwarding needed on the phone side.
 - **Pure Static Native Binary**: `adblink-agent` is compiled statically (`CGO_ENABLED=0`) with zero libc or bionic dependencies, running reliably on any Android version (Android 5.0 through 15+).
 - **Stream Multiplexing**: Powered by Yamux to multiplex multiple concurrent ADB sessions over a single TCP tunnel, with 170+ MB/s file transfer speeds (`adb push` / `adb pull`).
+- **Heartbeat and Auto-Reconnect**: Yamux PING/PONG heartbeats plus TCP keepalive protect idle mobile/NAT connections; a lost session is detected and the agent reconnects with exponential backoff while the server preserves its port during the grace period.
 - **Real-Time Traffic Monitoring**: Real-time packet-level throughput metrics for sent/received bytes, active streams, and total connections.
-- **Resilient Auto-Reconnect with Grace Period**: Automatic exponential backoff reconnect on network drops. The server holds port reservations for a configurable grace period (default 30s) so the port remains unchanged after reconnection.
+- **Reliable Manual Disconnect**: A Web Dashboard disconnect sends a STOP command and acknowledgement, blocks the reconnect race, and releases the port immediately.
+- **Android Keep-Awake Safeguards**: On Android, the agent best-effort disables Doze and prevents Wi-Fi sleep while running, restoring the original settings on exit. A standalone native process cannot obtain a true partial wakelock without an Android app/permission; `termux-wake-lock` is used automatically when available.
 - **Multi-Architecture**: Cross-compiled binaries for ARM64, ARMv7, x86_64, and x86.
 - **Modern Web Dashboard**: Embedded dark-mode web management console with zero external CDN dependencies.
 - **CLI Management**: `adblink-ctl` for listing devices, auto-connecting, and deploying agents.
@@ -116,6 +118,7 @@ Flags:
 - `-host`: Hostname/IP advertised for `adb connect` (use public IP if deploying remotely).
 - `-port-min` / `-port-max`: Port range allocated to connected devices.
 - `-token`: Optional authentication token.
+- `-heartbeat`: Yamux heartbeat interval (default `15s`). Keep this below the idle timeout of the carrier/NAT in use.
 
 ---
 
@@ -139,7 +142,13 @@ adb shell /data/local/tmp/adblink-agent -server <server_ip>:8888
 
 # Or run silently in the background with -d (built-in daemon, no nohup needed):
 adb shell /data/local/tmp/adblink-agent -server <server_ip>:8888 -d
+
+# Optional tuning (heartbeat is enabled by default):
+# adb shell /data/local/tmp/adblink-agent -server <server_ip>:8888 -heartbeat 15s
+# Add -no-keep-awake only if Android power/network policy must not be changed.
 ```
+
+The agent automatically retries a dropped server connection. On Android it also applies best-effort Wi-Fi/Doze keep-awake safeguards for the lifetime of the agent; settings are restored when the process exits.
 
 ---
 
@@ -171,6 +180,8 @@ make test
 # Run full end-to-end integration test with live Android instance
 make test-e2e
 ```
+
+ADB's file-transfer protocol is ordered and stateful, so one `adb push`/`pull` stream is intentionally not split into worker threads. Yamux already runs independent ADB connections concurrently; splitting a single stream would trade a small theoretical throughput gain for corruption/reordering risk.
 
 ---
 

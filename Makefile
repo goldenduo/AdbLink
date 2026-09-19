@@ -1,6 +1,6 @@
 .PHONY: all build build-all build-agent build-server build-ctl build-ctl-all test test-e2e clean docker-build help
 
-VERSION ?= 1.3.1
+VERSION ?= 1.4.0
 BIN_DIR ?= bin
 LDFLAGS = -s -w -X main.version=$(VERSION)
 
@@ -35,10 +35,10 @@ build-ctl-all:
 build-agent:
 	@echo "==> Building adblink-agent for Android architectures..."
 	mkdir -p $(BIN_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/adblink-agent-android-arm64 ./cmd/adblink-agent
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm go build -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/adblink-agent-android-arm ./cmd/adblink-agent
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/adblink-agent-android-amd64 ./cmd/adblink-agent
-	CGO_ENABLED=0 GOOS=linux GOARCH=386 go build -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/adblink-agent-android-386 ./cmd/adblink-agent
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags=adblinkandroid -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/adblink-agent-android-arm64 ./cmd/adblink-agent
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm go build -tags=adblinkandroid -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/adblink-agent-android-arm ./cmd/adblink-agent
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags=adblinkandroid -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/adblink-agent-android-amd64 ./cmd/adblink-agent
+	CGO_ENABLED=0 GOOS=linux GOARCH=386 go build -tags=adblinkandroid -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/adblink-agent-android-386 ./cmd/adblink-agent
 	@echo "==> All agent binaries built in $(BIN_DIR)/"
 
 test:

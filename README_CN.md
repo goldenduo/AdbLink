@@ -47,8 +47,10 @@
 - **跨网络穿透**：手机仅需具备出网能力（4G/5G 或任意 WiFi），即可主动连回公网/内网服务器，无需公网 IP 或路由器端口映射。
 - **纯静态原生二进制**：`adblink-agent` 采用纯静态编译（CGO_ENABLED=0），无任何动态链接库（libc/bionic）依赖，全版本 Android（Android 5.0 ~ 15+）开箱即用。
 - **高并发与流复用**：基于 Yamux 协议，在单个 TCP 长连接上多路复用并发 ADB 会话，支持高带宽文件传输（实测 `adb push`/`adb pull` 达 170+ MB/s）。
+- **心跳保活与自动重连**：Yamux PING/PONG 心跳配合 TCP keepalive，降低移动网络/NAT 对空闲长连接的清理概率；真正断线后 Agent 自动指数退避重连，服务端在 Grace Period 内保留原端口。
 - **实时流量与状态监控**：内置流式流量统计，准确监控双向传输流量（Rx / Tx）、活动连接数和会话生命周期。
-- **断线重连与端口保留（Grace Period）**：支持网络抖动自动指数退避重连；断开时服务器自动保留端口租赁（默认 30 秒），重连后端口保持一致，无需重新 `adb connect`。
+- **可靠的网页断开**：网页点击“断开”会发送 STOP 并等待确认，同时阻断断线重连竞态；手机端 Agent 会退出，不会过一会儿又自动连回来。
+- **Android 保活措施**：Agent 运行期间尽力关闭 Doze、禁止 Wi‑Fi 熄屏休眠，退出时恢复原设置；如果设备有 `termux-wake-lock`，会自动使用真正的 partial wakelock。纯原生进程在没有 Android App 权限时无法直接申请完整的 CPU WakeLock。
 - **多架构支持**：支持 ARM64、ARMv7、x86_64、x86。
 - **精美 Web 管理看板**：开箱即用、无外部 CDN 依赖的现代化暗色仪表盘，一键复制 `adb connect` 命令。
 - **CLI 命令行工具**：提供 `adblink-ctl`，支持快速查询设备、自动执行 `adb connect`，以及一键部署 agent 到手机。
@@ -116,6 +118,7 @@ bin/
 - `-host`：服务端对外宣告的主机名或 IP（用于生成 `adb connect <host>:<port>`，若在外网请填服务器外网 IP）。
 - `-port-min` / `-port-max`：分配给连接手机的 ADB 端口范围。
 - `-token`：可选安全验证密钥。
+- `-heartbeat`：Yamux 心跳间隔，默认 `15s`，应小于运营商/NAT 的空闲超时时间。
 
 ---
 
@@ -144,7 +147,13 @@ adb shell /data/local/tmp/adblink-agent -server <服务器IP>:8888
 
 # 或者若需在后台静默运行，添加 -d 即可（程序自身守护，无需 nohup）：
 adb shell /data/local/tmp/adblink-agent -server <服务器IP>:8888 -d
+
+# 可选调节（默认已开启心跳和 Android 保活措施）：
+# adb shell /data/local/tmp/adblink-agent -server <服务器IP>:8888 -heartbeat 15s
+# 如不希望修改 Android 电源/网络策略，可追加 -no-keep-awake
 ```
+
+Agent 会自动检测断线并重连；Android 端会在 Agent 进程运行期间尽力保持网络可用，进程退出后恢复临时修改的系统设置。
 
 成功连接后，日志将输出分配的端口号：
 ```text
@@ -290,3 +299,9 @@ A: `adblink-agent` 默认开启 `-auto-adbd=true`，会自动检测 `127.0.0.1:5
 
 **Q: 手机网络切换（如 WiFi 切 5G）断开连接怎么办？**  
 A: `adblink-agent` 具备智能指数退避重连机制；同时 `adblink-server` 会为断开的设备保留默认 30 秒的端口租赁（Grace Period）。设备重连后无缝复用原端口，无需重新执行 `adb connect`。
+
+**Q: 网页点击“断开”后，手机为什么不会自动重新连回？**
+A: 这是有意设计：服务端会发送 STOP、等待 Agent 确认，并在短时间内拒绝同一设备 ID 的迟到重连。若要再次连接，重新启动手机上的 Agent 即可。
+
+**Q: 能否用多线程把一次 `adb push` 再拆快一些？**
+A: 不建议。ADB 文件传输是有序、有状态的单连接协议；当前 Yamux 已经让多个独立 ADB 连接并发传输。拆分单个流会引入乱序、校验和稳定性风险，因此稳定优先不做这种优化。

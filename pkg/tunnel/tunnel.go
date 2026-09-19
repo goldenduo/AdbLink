@@ -10,6 +10,11 @@ import (
 )
 
 const (
+	// DefaultHeartbeatInterval is deliberately shorter than the idle timeout
+	// used by many mobile carriers and NAT devices. Yamux PING frames keep an
+	// otherwise idle agent connection from being silently discarded.
+	DefaultHeartbeatInterval = 15 * time.Second
+
 	// Yamux writes share the underlying TCP connection with all ADB streams.
 	// A congested mobile link can take longer than the yamux default to accept a
 	// frame, so the write safety valve must not be treated as an ADB operation
@@ -30,12 +35,25 @@ var bufPool = sync.Pool{
 
 // DefaultYamuxConfig returns a tuned Yamux configuration for high-throughput ADB tunneling.
 func DefaultYamuxConfig() *yamux.Config {
+	return YamuxConfig(DefaultHeartbeatInterval)
+}
+
+// YamuxConfig returns a tuned Yamux configuration with an explicit heartbeat
+// interval. A non-positive interval uses DefaultHeartbeatInterval.
+//
+// Yamux's keepalive is enabled on purpose: the PING/PONG frames keep idle
+// mobile/NAT connections alive and make a genuinely dead TCP session close so
+// the agent can reconnect. ConnectionWriteTimeout is intentionally much longer
+// than the heartbeat interval because a PING shares the ordered TCP connection
+// with ADB payload data.
+func YamuxConfig(heartbeatInterval time.Duration) *yamux.Config {
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = DefaultHeartbeatInterval
+	}
+
 	cfg := yamux.DefaultConfig()
-	// Yamux's keepalive closes the whole session after one missed Ping. A Ping
-	// competes with a large ADB transfer on the same lossy TCP connection, so it
-	// can falsely disconnect an otherwise healthy stream. TCP keepalive is
-	// configured on the underlying connection instead.
-	cfg.EnableKeepAlive = false
+	cfg.EnableKeepAlive = true
+	cfg.KeepAliveInterval = heartbeatInterval
 	cfg.ConnectionWriteTimeout = yamuxConnectionWriteTimeout
 	// Allow 1MB window size for fast file transfer (adb push/pull)
 	cfg.MaxStreamWindowSize = 1024 * 1024

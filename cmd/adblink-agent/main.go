@@ -11,10 +11,11 @@ import (
 	"time"
 
 	"github.com/goldenduo/AdbLink/pkg/agent"
+	"github.com/goldenduo/AdbLink/pkg/tunnel"
 )
 
 var (
-	version = "1.3.1"
+	version = "1.4.0"
 )
 
 func main() {
@@ -27,6 +28,8 @@ func main() {
 	autoAdbd := flag.Bool("auto-adbd", true, "Automatically enable and restart local adbd over TCP if unreachable")
 	retry := flag.Duration("retry", 2*time.Second, "Initial reconnect retry backoff")
 	maxRetry := flag.Duration("max-retry", 30*time.Second, "Maximum reconnect retry backoff")
+	heartbeat := flag.Duration("heartbeat", tunnel.DefaultHeartbeatInterval, "Yamux heartbeat interval")
+	noKeepAwake := flag.Bool("no-keep-awake", false, "Do not apply Android Wi-Fi/Doze keep-awake safeguards")
 	daemonMode := flag.Bool("d", false, "Run in background as a daemon process")
 	daemonModeLong := flag.Bool("daemon", false, "Run in background as a daemon process")
 	showVersion := flag.Bool("version", false, "Show version and exit")
@@ -58,16 +61,18 @@ func main() {
 	`)
 
 	agCfg := agent.Config{
-		ServerAddr:       *serverAddr,
-		DeviceID:         *deviceID,
-		Model:            *model,
-		LocalAdbAddr:     *target,
-		RequestedPort:    *requestPort,
-		Token:            *token,
-		AutoAdbd:         *autoAdbd,
-		RetryInterval:    *retry,
-		MaxRetryInterval: *maxRetry,
-		Logger:           logger,
+		ServerAddr:        *serverAddr,
+		DeviceID:          *deviceID,
+		Model:             *model,
+		LocalAdbAddr:      *target,
+		RequestedPort:     *requestPort,
+		Token:             *token,
+		AutoAdbd:          *autoAdbd,
+		RetryInterval:     *retry,
+		MaxRetryInterval:  *maxRetry,
+		HeartbeatInterval: *heartbeat,
+		DisableKeepAwake:  *noKeepAwake,
+		Logger:            logger,
 	}
 
 	ag := agent.NewAgent(agCfg)

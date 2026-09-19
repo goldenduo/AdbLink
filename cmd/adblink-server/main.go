@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/goldenduo/AdbLink/pkg/server"
+	"github.com/goldenduo/AdbLink/pkg/tunnel"
 	"github.com/goldenduo/AdbLink/pkg/web"
 )
 
 var (
-	version = "1.3.1"
+	version = "1.4.0"
 )
 
 func main() {
@@ -25,6 +26,7 @@ func main() {
 	portMax := flag.Int("port-max", 55599, "Maximum port to assign for ADB connections")
 	token := flag.String("token", "", "Optional authentication token required from agents")
 	gracePeriod := flag.Duration("grace", 30*time.Second, "Grace period to hold port reservation on disconnect")
+	heartbeat := flag.Duration("heartbeat", tunnel.DefaultHeartbeatInterval, "Yamux heartbeat interval")
 	dataDir := flag.String("data-dir", "data", "Directory to store persistent data and auth credentials")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 
@@ -46,13 +48,14 @@ func main() {
 	`)
 
 	srvCfg := server.Config{
-		ListenAddr:    *listenAddr,
-		AdvertiseHost: *advertiseHost,
-		PortMin:       *portMin,
-		PortMax:       *portMax,
-		Token:         *token,
-		GracePeriod:   *gracePeriod,
-		Logger:        logger,
+		ListenAddr:        *listenAddr,
+		AdvertiseHost:     *advertiseHost,
+		PortMin:           *portMin,
+		PortMax:           *portMax,
+		Token:             *token,
+		GracePeriod:       *gracePeriod,
+		HeartbeatInterval: *heartbeat,
+		Logger:            logger,
 	}
 
 	srv, err := server.NewServer(srvCfg)

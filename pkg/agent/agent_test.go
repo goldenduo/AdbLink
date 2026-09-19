@@ -44,11 +44,12 @@ func TestAgentServerTunnel(t *testing.T) {
 
 	// 2. Start AdbLink Server
 	serverCfg := server.Config{
-		ListenAddr:    "127.0.0.1:0",
-		AdvertiseHost: "127.0.0.1",
-		PortMin:       45000,
-		PortMax:       45010,
-		Logger:        log.New(io.Discard, "", 0),
+		ListenAddr:        "127.0.0.1:0",
+		AdvertiseHost:     "127.0.0.1",
+		PortMin:           45000,
+		PortMax:           45010,
+		HeartbeatInterval: 20 * time.Millisecond,
+		Logger:            log.New(io.Discard, "", 0),
 	}
 	srv, err := server.NewServer(serverCfg)
 	if err != nil {
@@ -90,6 +91,12 @@ func TestAgentServerTunnel(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("device did not register in time")
+	}
+	initialLastSeen := devInfo.LastSeenAt
+	time.Sleep(80 * time.Millisecond)
+	updatedInfo, ok := srv.GetDevice("test-device-001")
+	if !ok || !updatedInfo.LastSeenAt.After(initialLastSeen) {
+		t.Fatalf("control heartbeat did not update LastSeenAt: initial=%v updated=%v", initialLastSeen, updatedInfo.LastSeenAt)
 	}
 
 	// 4. Connect simulated ADB client to server's exposed port
@@ -146,12 +153,15 @@ func TestRemoteDisconnectStopsAgent(t *testing.T) {
 
 	// 3. Connect Agent
 	agentCfg := Config{
-		ServerAddr:     srv.GetListenAddr(),
-		DeviceID:       "test-disconnect-device",
-		Model:          "DisconnectPhone",
-		AndroidVersion: "15",
-		LocalAdbAddr:   mockAdbdAddr,
-		Logger:         log.New(io.Discard, "", 0),
+		ServerAddr:        srv.GetListenAddr(),
+		DeviceID:          "test-disconnect-device",
+		Model:             "DisconnectPhone",
+		AndroidVersion:    "15",
+		LocalAdbAddr:      mockAdbdAddr,
+		RetryInterval:     10 * time.Millisecond,
+		MaxRetryInterval:  30 * time.Millisecond,
+		HeartbeatInterval: 20 * time.Millisecond,
+		Logger:            log.New(io.Discard, "", 0),
 	}
 	ag := NewAgent(agentCfg)
 
@@ -198,4 +208,95 @@ func TestRemoteDisconnectStopsAgent(t *testing.T) {
 	if stillExists {
 		t.Fatalf("device still exists or reconnected after disconnect")
 	}
+
+	// A late reconnect attempt from the same process (or a duplicate agent
+	// started before the stop tombstone expires) must be told to exit rather
+	// than being accepted as a new online session.
+	lateAgent := NewAgent(agentCfg)
+	lateCtx, lateCancel := context.WithCancel(context.Background())
+	defer lateCancel()
+	lateDone := make(chan struct{})
+	go func() {
+		_ = lateAgent.Run(lateCtx)
+		close(lateDone)
+	}()
+	select {
+	case <-lateDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("late agent did not honor the server stop request")
+	}
+}
+
+func TestAgentReconnectsAfterTransportEviction(t *testing.T) {
+	srv, err := server.NewServer(server.Config{
+		ListenAddr:        "127.0.0.1:0",
+		AdvertiseHost:     "127.0.0.1",
+		PortMin:           47000,
+		PortMax:           47010,
+		GracePeriod:       2 * time.Second,
+		HeartbeatInterval: 20 * time.Millisecond,
+		Logger:            log.New(io.Discard, "", 0),
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed to start server: %v", err)
+	}
+	defer srv.Stop()
+
+	ag := NewAgent(Config{
+		ServerAddr:        srv.GetListenAddr(),
+		DeviceID:          "test-reconnect-device",
+		Model:             "ReconnectPhone",
+		LocalAdbAddr:      "127.0.0.1:1",
+		RetryInterval:     10 * time.Millisecond,
+		MaxRetryInterval:  30 * time.Millisecond,
+		HeartbeatInterval: 20 * time.Millisecond,
+		Logger:            log.New(io.Discard, "", 0),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = ag.Run(ctx) }()
+
+	var first server.DeviceInfo
+	if !waitForDeviceStatus(t, srv, "test-reconnect-device", "ONLINE", 3*time.Second, &first) {
+		t.Fatal("agent did not register before transport eviction")
+	}
+
+	// EvictDevice models a real TCP/session failure. Unlike the web-console
+	// DisconnectDevice operation, the agent must reconnect automatically.
+	srv.EvictDevice("test-reconnect-device")
+
+	deadline := time.Now().Add(3 * time.Second)
+	var second server.DeviceInfo
+	for time.Now().Before(deadline) {
+		if info, ok := srv.GetDevice("test-reconnect-device"); ok && info.Status == "ONLINE" && info.ConnectedAt.After(first.ConnectedAt) {
+			second = info
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if second.Status != "ONLINE" {
+		t.Fatal("agent did not reconnect after transport eviction")
+	}
+	if second.AssignedPort != first.AssignedPort {
+		t.Fatalf("reconnect changed assigned port: first=%d second=%d", first.AssignedPort, second.AssignedPort)
+	}
+}
+
+func waitForDeviceStatus(t *testing.T, srv *server.Server, deviceID, status string, timeout time.Duration, result *server.DeviceInfo) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if info, ok := srv.GetDevice(deviceID); ok && info.Status == status {
+			if result != nil {
+				*result = info
+			}
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
 }

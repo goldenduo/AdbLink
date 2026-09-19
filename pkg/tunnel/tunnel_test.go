@@ -113,15 +113,40 @@ func TestYamuxLoopback(t *testing.T) {
 	}
 }
 
-func TestDefaultYamuxConfigDoesNotKillSlowADBStreams(t *testing.T) {
+func TestDefaultYamuxConfigKeepsIdleSessionsAlive(t *testing.T) {
 	cfg := DefaultYamuxConfig()
-	if cfg.EnableKeepAlive {
-		t.Fatal("yamux keepalive must not close an active ADB session after one missed ping")
+	if !cfg.EnableKeepAlive {
+		t.Fatal("yamux keepalive must be enabled to protect idle mobile connections")
+	}
+	if cfg.KeepAliveInterval != DefaultHeartbeatInterval {
+		t.Fatalf("heartbeat interval = %v, want %v", cfg.KeepAliveInterval, DefaultHeartbeatInterval)
 	}
 	if cfg.ConnectionWriteTimeout < 2*time.Minute {
-		t.Fatalf("connection write timeout is too short: %v", cfg.ConnectionWriteTimeout)
+		t.Fatalf("connection write timeout is too short for large ADB transfers: %v", cfg.ConnectionWriteTimeout)
 	}
 	if cfg.StreamCloseTimeout < 5*time.Minute {
 		t.Fatalf("stream close timeout is too short: %v", cfg.StreamCloseTimeout)
+	}
+}
+
+func TestYamuxHeartbeatKeepsIdleLoopbackAlive(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	cfg := YamuxConfig(10 * time.Millisecond)
+
+	serverSession, err := yamux.Server(serverConn, cfg.Clone())
+	if err != nil {
+		t.Fatalf("yamux.Server failed: %v", err)
+	}
+	defer serverSession.Close()
+
+	clientSession, err := yamux.Client(clientConn, cfg.Clone())
+	if err != nil {
+		t.Fatalf("yamux.Client failed: %v", err)
+	}
+	defer clientSession.Close()
+
+	time.Sleep(75 * time.Millisecond)
+	if serverSession.IsClosed() || clientSession.IsClosed() {
+		t.Fatal("idle Yamux sessions closed while heartbeat was active")
 	}
 }

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # scripts/build_all.sh: Cross-compile AdbLink for Android (arm64, x64), Linux, macOS, and Windows
 
-VERSION="${VERSION:-1.3.1}"
+VERSION="${VERSION:-1.4.0}"
 LDFLAGS="-s -w -X main.version=${VERSION}"
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,16 +20,16 @@ echo " 1. Compiling Android Native Agent (ARM64 & x86_64/x64)"
 echo "========================================================="
 
 echo "  -> Android ARM64 (aarch64)..."
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o "${BIN_DIR}/android/adblink-agent-arm64" ./cmd/adblink-agent
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags=adblinkandroid -ldflags="${LDFLAGS}" -o "${BIN_DIR}/android/adblink-agent-arm64" ./cmd/adblink-agent
 
 echo "  -> Android x86_64 (x64)..."
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o "${BIN_DIR}/android/adblink-agent-x86_64" ./cmd/adblink-agent
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags=adblinkandroid -ldflags="${LDFLAGS}" -o "${BIN_DIR}/android/adblink-agent-x86_64" ./cmd/adblink-agent
 
 echo "  -> Android ARMv7 (32-bit)..."
-CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="${LDFLAGS}" -o "${BIN_DIR}/android/adblink-agent-armv7" ./cmd/adblink-agent
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -tags=adblinkandroid -ldflags="${LDFLAGS}" -o "${BIN_DIR}/android/adblink-agent-armv7" ./cmd/adblink-agent
 
 echo "  -> Android x86 (32-bit)..."
-CGO_ENABLED=0 GOOS=linux GOARCH=386 go build -ldflags="${LDFLAGS}" -o "${BIN_DIR}/android/adblink-agent-x86" ./cmd/adblink-agent
+CGO_ENABLED=0 GOOS=linux GOARCH=386 go build -tags=adblinkandroid -ldflags="${LDFLAGS}" -o "${BIN_DIR}/android/adblink-agent-x86" ./cmd/adblink-agent
 
 echo "========================================================="
 echo " 2. Compiling PC - Linux (x86_64 & ARM64)"

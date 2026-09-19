@@ -28,6 +28,7 @@ const (
 	StatusUnauthorized    StatusCode = "UNAUTHORIZED"
 	StatusPortUnavailable StatusCode = "PORT_UNAVAILABLE"
 	StatusDeviceConflict  StatusCode = "DEVICE_CONFLICT"
+	StatusStopped         StatusCode = "STOPPED"
 	StatusError           StatusCode = "ERROR"
 )
 

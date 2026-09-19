@@ -24,19 +24,21 @@ var ErrRemoteStop = errors.New("remote stop requested by server")
 
 // Config configures the AdbLink Agent (Android native proxy).
 type Config struct {
-	ServerAddr       string        // Remote server address, e.g. "1.2.3.4:9000"
-	DeviceID         string        // Unique device serial or ID (auto-detected if empty)
-	Model            string        // Device model (auto-detected if empty)
-	Manufacturer     string        // Device manufacturer
-	AndroidVersion   string        // Android OS version
-	LocalAdbAddr     string        // Local adbd address (default "127.0.0.1:5555")
-	RequestedPort    int           // Desired port on server (0 = auto)
-	Token            string        // Authentication token
-	AutoAdbd         bool          // Automatically enable adbd TCP port
-	RetryInterval    time.Duration // Initial reconnect backoff
-	MaxRetryInterval time.Duration // Maximum reconnect backoff
-	DialTimeout      time.Duration // Server dial timeout
-	Logger           *log.Logger
+	ServerAddr        string        // Remote server address, e.g. "1.2.3.4:9000"
+	DeviceID          string        // Unique device serial or ID (auto-detected if empty)
+	Model             string        // Device model (auto-detected if empty)
+	Manufacturer      string        // Device manufacturer
+	AndroidVersion    string        // Android OS version
+	LocalAdbAddr      string        // Local adbd address (default "127.0.0.1:5555")
+	RequestedPort     int           // Desired port on server (0 = auto)
+	Token             string        // Authentication token
+	AutoAdbd          bool          // Automatically enable adbd TCP port
+	RetryInterval     time.Duration // Initial reconnect backoff
+	MaxRetryInterval  time.Duration // Maximum reconnect backoff
+	DialTimeout       time.Duration // Server dial timeout
+	HeartbeatInterval time.Duration // Yamux heartbeat interval
+	DisableKeepAwake  bool          // Disable Android best-effort network/power keep-awake
+	Logger            *log.Logger
 }
 
 // Agent is the native proxy running on Android.
@@ -47,6 +49,7 @@ type Agent struct {
 	session       *yamux.Session
 	closed        bool
 	remoteStopped bool
+	sessionReady  bool
 	cancelFunc    context.CancelFunc
 }
 
@@ -63,6 +66,12 @@ func NewAgent(cfg Config) *Agent {
 	}
 	if cfg.DialTimeout == 0 {
 		cfg.DialTimeout = 10 * time.Second
+	}
+	if cfg.HeartbeatInterval <= 0 {
+		cfg.HeartbeatInterval = tunnel.DefaultHeartbeatInterval
+	}
+	if cfg.MaxRetryInterval < cfg.RetryInterval {
+		cfg.MaxRetryInterval = cfg.RetryInterval
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = log.New(os.Stdout, "[AdbLink-Agent] ", log.LstdFlags|log.Lmsgprefix)
@@ -107,6 +116,17 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 
 	backoff := a.cfg.RetryInterval
+	keepAwake := newPowerKeeper(a.logger)
+	if !a.cfg.DisableKeepAwake {
+		if err := keepAwake.Start(); err != nil {
+			a.logger.Printf("Warning: unable to enable Android keep-awake safeguards: %v", err)
+		}
+	}
+	defer func() {
+		if err := keepAwake.Stop(); err != nil {
+			a.logger.Printf("Warning: unable to restore Android power/network settings: %v", err)
+		}
+	}()
 
 	for {
 		select {
@@ -118,6 +138,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		err := a.connectAndServe(ctx)
 		a.mu.Lock()
 		stopped := a.remoteStopped || a.closed
+		sessionReady := a.sessionReady
+		a.sessionReady = false
 		a.mu.Unlock()
 
 		if errors.Is(err, ErrRemoteStop) || stopped {
@@ -128,6 +150,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		if err != nil {
 			a.logger.Printf("Connection error: %v", err)
 		}
+		if sessionReady {
+			// A dropped established session should retry quickly even if earlier
+			// dial failures had already increased the exponential backoff.
+			backoff = a.cfg.RetryInterval
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -135,7 +162,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 
 		// Exponential backoff with jitter
-		jitter := time.Duration(rand.Int64N(int64(backoff / 2)))
+		var jitter time.Duration
+		if jitterLimit := int64(backoff / 2); jitterLimit > 0 {
+			jitter = time.Duration(rand.Int64N(jitterLimit))
+		}
 		sleepDuration := backoff + jitter
 		a.logger.Printf("Reconnecting to %s in %v...", a.cfg.ServerAddr, sleepDuration)
 
@@ -145,9 +175,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-time.After(sleepDuration):
 		}
 
-		backoff *= 2
-		if backoff > a.cfg.MaxRetryInterval {
+		if backoff > a.cfg.MaxRetryInterval/2 {
 			backoff = a.cfg.MaxRetryInterval
+		} else {
+			backoff *= 2
 		}
 	}
 }
@@ -176,7 +207,7 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		AndroidVersion: a.cfg.AndroidVersion,
 		Token:          a.cfg.Token,
 		RequestedPort:  a.cfg.RequestedPort,
-		ClientVersion:  "1.3.1",
+		ClientVersion:  "1.4.0",
 	}
 
 	if err := protocol.WriteMsg(conn, req); err != nil {
@@ -188,6 +219,9 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		return fmt.Errorf("read register response failed: %w", err)
 	}
 
+	if resp.Status == protocol.StatusStopped {
+		return fmt.Errorf("server requested agent shutdown: %w", ErrRemoteStop)
+	}
 	if resp.Status != protocol.StatusOK {
 		return fmt.Errorf("server rejected registration: [%s] %s", resp.Status, resp.Message)
 	}
@@ -200,7 +234,7 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 	_ = conn.SetDeadline(time.Time{})
 
 	// Upgrade to Yamux client session
-	session, err := yamux.Client(conn, tunnel.DefaultYamuxConfig())
+	session, err := yamux.Client(conn, tunnel.YamuxConfig(a.cfg.HeartbeatInterval))
 	if err != nil {
 		return fmt.Errorf("start yamux client session failed: %w", err)
 	}
@@ -208,7 +242,15 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 
 	a.mu.Lock()
 	a.session = session
+	a.sessionReady = true
 	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		if a.session == session {
+			a.session = nil
+		}
+		a.mu.Unlock()
+	}()
 
 	// Open dedicated control stream to server
 	controlStream, err := session.OpenStream()
@@ -237,14 +279,13 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 			_ = session.Close()
 			return err
 		}
-		// Other control errors: keep session alive or wait for stream errors
-		select {
-		case err := <-streamErrChan:
-			return err
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		// The control stream is mandatory. If it closes unexpectedly, tear
+		// down the session immediately so Run can reconnect instead of waiting
+		// forever for AcceptStream.
+		_ = session.Close()
+		return fmt.Errorf("control stream ended: %w", err)
 	case err := <-streamErrChan:
+		_ = session.Close()
 		return err
 	}
 }
@@ -252,8 +293,11 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 // acceptStreams listens for incoming reverse streams from the server and forwards to local adbd.
 func (a *Agent) acceptStreams(ctx context.Context, session *yamux.Session) error {
 	for {
-		stream, err := session.AcceptStream()
+		stream, err := session.AcceptStreamWithContext(ctx)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
 			if err == io.EOF || session.IsClosed() {
 				return fmt.Errorf("server closed session")
 			}
@@ -312,11 +356,21 @@ func (a *Agent) listenControlCommands(stream net.Conn) error {
 		switch cmd {
 		case "STOP":
 			a.logger.Printf("[AdbLink-Agent] Received STOP command from server. Shutting down...")
+			_ = stream.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			_, _ = io.WriteString(stream, "STOP_ACK\n")
+			_ = stream.SetWriteDeadline(time.Time{})
 			a.mu.Lock()
 			a.remoteStopped = true
 			a.mu.Unlock()
 			a.Stop()
 			return ErrRemoteStop
+		case "PING":
+			// PONG is only an idle-health hint; a delayed response must not
+			// tear down an otherwise valid ADB session. Yamux's own heartbeat
+			// remains authoritative for transport failure detection.
+			_ = stream.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			_, _ = io.WriteString(stream, "PONG\n")
+			_ = stream.SetWriteDeadline(time.Time{})
 		}
 	}
 }

@@ -1,12 +1,14 @@
 package server
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,15 +23,21 @@ var (
 	ErrNotFound     = errors.New("device not found")
 )
 
+const (
+	controlStreamWait = 2 * time.Second
+	stopRequestTTL    = 30 * time.Second
+)
+
 // Config configures the AdbLink Server.
 type Config struct {
-	ListenAddr    string        // e.g. ":9000"
-	AdvertiseHost string        // e.g. "127.0.0.1" or public IP
-	PortMin       int           // e.g. 55550
-	PortMax       int           // e.g. 55599
-	Token         string        // Shared secret auth token (optional)
-	GracePeriod   time.Duration // Reconnection grace period (e.g. 30s)
-	Logger        *log.Logger
+	ListenAddr        string        // e.g. ":9000"
+	AdvertiseHost     string        // e.g. "127.0.0.1" or public IP
+	PortMin           int           // e.g. 55550
+	PortMax           int           // e.g. 55599
+	Token             string        // Shared secret auth token (optional)
+	GracePeriod       time.Duration // Reconnection grace period (e.g. 30s)
+	HeartbeatInterval time.Duration // Yamux heartbeat interval
+	Logger            *log.Logger
 }
 
 // DeviceInfo provides snapshot metadata and statistics for a device.
@@ -59,6 +67,12 @@ type DeviceSession struct {
 	controlStream    net.Conn
 	closed           bool
 	closeChan        chan struct{}
+	closeOnce        sync.Once
+	controlReady     chan struct{}
+	controlReadyOnce sync.Once
+	controlWriteMu   sync.Mutex
+	stopAck          chan struct{}
+	stopAckOnce      sync.Once
 	disconnectTimer  *time.Timer
 	activeStreams    int64
 	totalConnections int64
@@ -68,15 +82,17 @@ type DeviceSession struct {
 
 // Server is the central reverse-tunnel ADB server.
 type Server struct {
-	cfg          Config
-	logger       *log.Logger
-	portPool     *PortPool
-	listener     net.Listener
-	mu           sync.RWMutex
-	devices      map[string]*DeviceSession
-	closed       bool
-	shutdownChan chan struct{}
-	wg           sync.WaitGroup
+	cfg            Config
+	logger         *log.Logger
+	portPool       *PortPool
+	listener       net.Listener
+	mu             sync.RWMutex
+	registrationMu sync.Mutex
+	devices        map[string]*DeviceSession
+	stopRequests   map[string]time.Time
+	closed         bool
+	shutdownChan   chan struct{}
+	wg             sync.WaitGroup
 }
 
 // NewServer creates a new AdbLink Server.
@@ -96,6 +112,9 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.GracePeriod == 0 {
 		cfg.GracePeriod = 30 * time.Second
 	}
+	if cfg.HeartbeatInterval <= 0 {
+		cfg.HeartbeatInterval = tunnel.DefaultHeartbeatInterval
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = log.New(os.Stdout, "[AdbLink-Server] ", log.LstdFlags|log.Lmsgprefix)
 	}
@@ -110,6 +129,7 @@ func NewServer(cfg Config) (*Server, error) {
 		logger:       cfg.Logger,
 		portPool:     pool,
 		devices:      make(map[string]*DeviceSession),
+		stopRequests: make(map[string]time.Time),
 		shutdownChan: make(chan struct{}),
 	}, nil
 }
@@ -206,6 +226,22 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 	if req.DeviceID == "" {
 		req.DeviceID = fmt.Sprintf("device-%d", time.Now().UnixNano())
 	}
+	// Serialize eviction, port allocation, listener binding, and registry
+	// insertion for the same server. Without this, two fast reconnects could
+	// both pass the old-session check and leak a port or replace each other.
+	s.registrationMu.Lock()
+	defer s.registrationMu.Unlock()
+	if s.isStopRequested(req.DeviceID) {
+		s.logger.Printf("Rejecting reconnect for manually disconnected device %s", req.DeviceID)
+		_ = protocol.WriteMsg(conn, protocol.RegisterResponse{
+			Magic:   protocol.MagicHeader,
+			Version: protocol.CurrentProtocolVersion,
+			Status:  protocol.StatusStopped,
+			Message: "agent was manually disconnected from the web console",
+		})
+		_ = conn.Close()
+		return
+	}
 	// Evict any existing session for this device to prevent port bind conflicts
 	s.EvictDevice(req.DeviceID)
 
@@ -232,7 +268,7 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 		Version:       protocol.CurrentProtocolVersion,
 		Status:        protocol.StatusOK,
 		Message:       "Registration successful",
-		ServerVersion: "1.3.1",
+		ServerVersion: "1.4.0",
 		AdvertiseHost: s.cfg.AdvertiseHost,
 	}
 	if err := protocol.WriteMsg(conn, resp); err != nil {
@@ -243,7 +279,7 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 	}
 
 	// Upgrade connection to Yamux server
-	session, err := yamux.Server(conn, tunnel.DefaultYamuxConfig())
+	session, err := yamux.Server(conn, tunnel.YamuxConfig(s.cfg.HeartbeatInterval))
 	if err != nil {
 		s.logger.Printf("Failed to create yamux server session for %s: %v", remoteAddr, err)
 		s.portPool.Release(assignedPort, req.DeviceID)
@@ -265,15 +301,10 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 	s.logger.Printf("Device registered: %s (model: %s) -> Port %d. Connect via: adb connect %s:%d",
 		req.DeviceID, req.Model, assignedPort, s.cfg.AdvertiseHost, assignedPort)
 
-	// Accept dedicated control stream from agent
-	go func() {
-		ctrlStream, err := session.AcceptStream()
-		if err == nil {
-			devSession.mu.Lock()
-			devSession.controlStream = ctrlStream
-			devSession.mu.Unlock()
-		}
-	}()
+	// Accept and monitor the dedicated control stream from the agent. Keeping
+	// this reader alive is also what lets an explicit web-console disconnect
+	// wait for STOP_ACK instead of racing the transport close.
+	go s.acceptControlStream(devSession)
 
 	// Run ADB forwarding loop
 	go s.runAdbForwardingLoop(devSession)
@@ -291,24 +322,7 @@ func (s *Server) registerDeviceSession(
 	adbListener net.Listener,
 ) *DeviceSession {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Check if this device had a previous session
-	oldSession, exists := s.devices[req.DeviceID]
-	if exists {
-		oldSession.mu.Lock()
-		if oldSession.disconnectTimer != nil {
-			oldSession.disconnectTimer.Stop()
-			oldSession.disconnectTimer = nil
-		}
-		if oldSession.tcpListener != nil {
-			_ = oldSession.tcpListener.Close()
-		}
-		if oldSession.yamuxSession != nil {
-			_ = oldSession.yamuxSession.Close()
-		}
-		oldSession.mu.Unlock()
-	}
+	oldSession := s.devices[req.DeviceID]
 
 	devSession := &DeviceSession{
 		info: DeviceInfo{
@@ -326,16 +340,142 @@ func (s *Server) registerDeviceSession(
 		yamuxSession: session,
 		tcpListener:  adbListener,
 		closeChan:    make(chan struct{}),
+		controlReady: make(chan struct{}),
+		stopAck:      make(chan struct{}),
 	}
 
 	s.devices[req.DeviceID] = devSession
+	s.mu.Unlock()
+
+	if oldSession != nil {
+		// This is a defensive path for a concurrent lifecycle race. The normal
+		// registration flow evicts the previous session before reaching here.
+		oldDeviceID, oldPort, _, _, _, _, _ := s.closeDeviceResources(oldSession, "DISCONNECTED")
+		if oldPort != assignedPort {
+			s.portPool.ReleaseWithGracePeriod(oldPort, oldDeviceID, s.cfg.GracePeriod)
+		}
+	}
 	return devSession
+}
+
+// acceptControlStream accepts the first agent-created stream and keeps it
+// reserved for management commands. All ADB streams are opened by the server
+// later, so accepting this stream separately prevents STOP/control races.
+func (s *Server) acceptControlStream(dev *DeviceSession) {
+	dev.mu.RLock()
+	session := dev.yamuxSession
+	dev.mu.RUnlock()
+	if session == nil {
+		dev.controlReadyOnce.Do(func() { close(dev.controlReady) })
+		return
+	}
+
+	stream, err := session.AcceptStream()
+	if err != nil {
+		dev.controlReadyOnce.Do(func() { close(dev.controlReady) })
+		return
+	}
+
+	dev.mu.Lock()
+	if dev.closed {
+		dev.mu.Unlock()
+		_ = stream.Close()
+		dev.controlReadyOnce.Do(func() { close(dev.controlReady) })
+		return
+	}
+	dev.controlStream = stream
+	dev.mu.Unlock()
+	dev.controlReadyOnce.Do(func() { close(dev.controlReady) })
+	go s.runControlHeartbeat(dev)
+
+	reader := bufio.NewReader(stream)
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			dev.mu.RLock()
+			closed := dev.closed
+			dev.mu.RUnlock()
+			if !closed && !session.IsClosed() {
+				// A control stream that disappears independently of Yamux is not
+				// a usable agent session. Closing Yamux wakes monitorSession and
+				// lets the agent's reconnect loop take over.
+				_ = session.Close()
+			}
+			return
+		}
+
+		switch strings.TrimSpace(line) {
+		case "STOP_ACK":
+			dev.stopAckOnce.Do(func() { close(dev.stopAck) })
+		case "PONG":
+			dev.mu.Lock()
+			dev.info.LastSeenAt = time.Now()
+			dev.mu.Unlock()
+		}
+	}
+}
+
+// runControlHeartbeat sends a lightweight application heartbeat while the
+// tunnel is idle. Yamux also sends transport-level PING/PONG frames; this
+// control heartbeat gives the server an accurate LastSeenAt value without
+// adding more frames while a large ADB stream is already moving data.
+func (s *Server) runControlHeartbeat(dev *DeviceSession) {
+	ticker := time.NewTicker(s.cfg.HeartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.shutdownChan:
+			return
+		case <-dev.closeChan:
+			return
+		case <-ticker.C:
+			if atomic.LoadInt64(&dev.activeStreams) > 0 {
+				continue
+			}
+			if err := s.sendControlCommand(dev, "PING\n"); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s *Server) isStopRequested(deviceID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	expiresAt, ok := s.stopRequests[deviceID]
+	if !ok {
+		return false
+	}
+	if time.Now().After(expiresAt) {
+		delete(s.stopRequests, deviceID)
+		return false
+	}
+	return true
+}
+
+func (s *Server) requestStop(deviceID string) {
+	ttl := stopRequestTTL
+	if s.cfg.GracePeriod > ttl {
+		ttl = s.cfg.GracePeriod
+	}
+	s.mu.Lock()
+	s.stopRequests[deviceID] = time.Now().Add(ttl)
+	s.mu.Unlock()
 }
 
 // runAdbForwardingLoop accepts ADB connections from clients and tunnels them to the agent.
 func (s *Server) runAdbForwardingLoop(dev *DeviceSession) {
 	for {
-		clientConn, err := dev.tcpListener.Accept()
+		dev.mu.RLock()
+		listener := dev.tcpListener
+		dev.mu.RUnlock()
+		if listener == nil {
+			return
+		}
+
+		clientConn, err := listener.Accept()
 		if err != nil {
 			dev.mu.RLock()
 			closed := dev.closed
@@ -358,6 +498,7 @@ func (s *Server) forwardAdbConnection(dev *DeviceSession, clientConn net.Conn) {
 
 	dev.mu.RLock()
 	session := dev.yamuxSession
+	deviceID := dev.info.DeviceID
 	dev.mu.RUnlock()
 
 	if session == nil || session.IsClosed() {
@@ -368,7 +509,7 @@ func (s *Server) forwardAdbConnection(dev *DeviceSession, clientConn net.Conn) {
 	// Open a multiplexed stream to the Android agent
 	stream, err := session.OpenStream()
 	if err != nil {
-		s.logger.Printf("Failed to open yamux stream to device %s: %v", dev.info.DeviceID, err)
+		s.logger.Printf("Failed to open yamux stream to device %s: %v", deviceID, err)
 		_ = clientConn.Close()
 		return
 	}
@@ -384,7 +525,7 @@ func (s *Server) forwardAdbConnection(dev *DeviceSession, clientConn net.Conn) {
 	)
 	if forwardErr != nil && !errors.Is(forwardErr, io.EOF) && !errors.Is(forwardErr, net.ErrClosed) {
 		s.logger.Printf("ADB stream for device %s ended with error: %v (host->phone: %d, phone->host: %d)",
-			dev.info.DeviceID, forwardErr, n1, n2)
+			deviceID, forwardErr, n1, n2)
 	}
 
 	dev.mu.Lock()
@@ -404,64 +545,106 @@ func (s *Server) monitorSession(dev *DeviceSession) {
 		return
 	}
 
-	// The yamux session closes its CloseChan when the underlying TCP connection
-	// fails. Do not send application Pings here: a Ping shares the same ordered
-	// TCP stream as an active adb push and a transient write delay must not tear
-	// down the device listener and every in-flight ADB operation.
+	// YamuxConfig owns the bidirectional PING/PONG heartbeat. This monitor only
+	// waits for Yamux's authoritative close signal; sending another Ping here
+	// would make a transient write delay compete with an active ADB transfer.
 	select {
 	case <-s.shutdownChan:
 	case <-dev.closeChan:
 	case <-session.CloseChan():
-		s.logger.Printf("Yamux session closed for device %s", dev.info.DeviceID)
+		dev.mu.RLock()
+		deviceID := dev.info.DeviceID
+		dev.mu.RUnlock()
+		s.logger.Printf("Yamux session closed for device %s", deviceID)
 		s.handleDeviceDisconnected(dev)
 	}
 }
-func (s *Server) handleDeviceDisconnected(dev *DeviceSession) {
+
+// closeDeviceResources marks a session closed and detaches its resources.
+// Network operations are performed after releasing dev.mu so a Yamux shutdown
+// cannot deadlock a goroutine that is trying to observe the device state.
+func (s *Server) closeDeviceResources(dev *DeviceSession, status string) (deviceID string, port int, session *yamux.Session, listener net.Listener, control net.Conn, timer *time.Timer, alreadyClosed bool) {
 	dev.mu.Lock()
-	if dev.closed {
-		dev.mu.Unlock()
+	deviceID = dev.info.DeviceID
+	port = dev.info.AssignedPort
+	alreadyClosed = dev.closed
+	if !dev.closed {
+		dev.closed = true
+		if status != "" {
+			dev.info.Status = status
+		}
+	}
+	dev.closeOnce.Do(func() { close(dev.closeChan) })
+	dev.controlReadyOnce.Do(func() { close(dev.controlReady) })
+
+	session = dev.yamuxSession
+	dev.yamuxSession = nil
+	listener = dev.tcpListener
+	dev.tcpListener = nil
+	control = dev.controlStream
+	dev.controlStream = nil
+	timer = dev.disconnectTimer
+	dev.disconnectTimer = nil
+	dev.mu.Unlock()
+
+	if listener != nil {
+		_ = listener.Close()
+	}
+	if session != nil {
+		_ = session.Close()
+	}
+	if control != nil {
+		_ = control.Close()
+	}
+	if timer != nil {
+		timer.Stop()
+	}
+	return
+}
+
+func (s *Server) handleDeviceDisconnected(dev *DeviceSession) {
+	deviceID, port, _, _, _, _, alreadyClosed := s.closeDeviceResources(dev, "DISCONNECTED")
+	if alreadyClosed {
 		return
 	}
-	dev.closed = true
-	dev.info.Status = "DISCONNECTED"
-	if dev.tcpListener != nil {
-		_ = dev.tcpListener.Close()
-		dev.tcpListener = nil
-	}
-	if dev.yamuxSession != nil {
-		_ = dev.yamuxSession.Close()
-		dev.yamuxSession = nil
-	}
-	dev.mu.Unlock()
 
 	// Verify this session is still the active one before releasing its port
 	s.mu.RLock()
-	currentDev, exists := s.devices[dev.info.DeviceID]
+	currentDev, exists := s.devices[deviceID]
 	s.mu.RUnlock()
 	if exists && currentDev != dev {
-		s.logger.Printf("Skipping port release for %s: a new session has already taken over", dev.info.DeviceID)
+		s.logger.Printf("Skipping port release for %s: a new session has already taken over", deviceID)
+		return
+	}
+	if !exists {
 		return
 	}
 	s.logger.Printf("Device %s disconnected. Keeping port %d reserved for %v grace period",
-		dev.info.DeviceID, dev.info.AssignedPort, s.cfg.GracePeriod)
+		deviceID, port, s.cfg.GracePeriod)
 
-	s.portPool.ReleaseWithGracePeriod(dev.info.AssignedPort, dev.info.DeviceID, s.cfg.GracePeriod)
+	s.portPool.ReleaseWithGracePeriod(port, deviceID, s.cfg.GracePeriod)
 
 	// Set timer to purge device after grace period
 	dev.mu.Lock()
-	dev.disconnectTimer = time.AfterFunc(s.cfg.GracePeriod, func() {
-		s.purgeDevice(dev.info.DeviceID)
-	})
+	if dev.disconnectTimer == nil {
+		dev.disconnectTimer = time.AfterFunc(s.cfg.GracePeriod, func() {
+			s.purgeDevice(deviceID, dev)
+		})
+	}
 	dev.mu.Unlock()
 }
 
 // purgeDevice removes the device completely after grace period expires.
-func (s *Server) purgeDevice(deviceID string) {
+func (s *Server) purgeDevice(deviceID string, expectedSession ...*DeviceSession) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	dev, exists := s.devices[deviceID]
-	if !exists {
+	var expected *DeviceSession
+	if len(expectedSession) > 0 {
+		expected = expectedSession[0]
+	}
+	if !exists || (expected != nil && dev != expected) {
 		return
 	}
 
@@ -471,6 +654,7 @@ func (s *Server) purgeDevice(deviceID string) {
 		return
 	}
 	dev.closed = true
+	dev.closeOnce.Do(func() { close(dev.closeChan) })
 	dev.mu.Unlock()
 
 	delete(s.devices, deviceID)
@@ -519,6 +703,12 @@ func (s *Server) GetDevice(id string) (DeviceInfo, bool) {
 
 // DisconnectDevice forces a device disconnection and commands the agent to exit cleanly.
 func (s *Server) DisconnectDevice(id string) error {
+	// Serialize the stop request with a concurrent registration. This prevents a
+	// reconnect from winning the port allocation race while the web request is
+	// still waiting for STOP_ACK.
+	s.registrationMu.Lock()
+	defer s.registrationMu.Unlock()
+
 	s.mu.RLock()
 	dev, ok := s.devices[id]
 	s.mu.RUnlock()
@@ -527,66 +717,88 @@ func (s *Server) DisconnectDevice(id string) error {
 		return ErrNotFound
 	}
 
-	dev.mu.Lock()
-	if dev.controlStream != nil {
-		s.logger.Printf("Sending STOP command to agent on device %s...", id)
-		_, _ = dev.controlStream.Write([]byte("STOP\n"))
-		_ = dev.controlStream.Close()
-		dev.controlStream = nil
+	s.requestStop(id)
+
+	dev.mu.RLock()
+	controlReady := dev.controlReady
+	dev.mu.RUnlock()
+	select {
+	case <-controlReady:
+	case <-time.After(controlStreamWait):
+		s.logger.Printf("Timed out waiting for control stream from device %s; closing transport", id)
+	case <-s.shutdownChan:
 	}
-	dev.mu.Unlock()
 
-	// Wait briefly for agent to receive command and exit gracefully
-	time.Sleep(250 * time.Millisecond)
+	if err := s.sendControlCommand(dev, "STOP\n"); err != nil && !errors.Is(err, net.ErrClosed) {
+		s.logger.Printf("Unable to send STOP to device %s: %v", id, err)
+	} else if err == nil {
+		select {
+		case <-dev.stopAck:
+		case <-time.After(controlStreamWait):
+			s.logger.Printf("Timed out waiting for STOP_ACK from device %s; closing transport", id)
+		case <-s.shutdownChan:
+		}
+	}
 
-	s.EvictDevice(id)
-	s.portPool.Release(dev.info.AssignedPort, id)
+	// Explicit disconnects release the port immediately. The stop tombstone
+	// above blocks a reconnect race and makes the agent exit on the next
+	// registration attempt if STOP could not reach it.
+	s.evictDeviceSession(id, dev, false)
 	return nil
 }
 
+func (s *Server) sendControlCommand(dev *DeviceSession, command string) error {
+	dev.mu.RLock()
+	control := dev.controlStream
+	closed := dev.closed
+	dev.mu.RUnlock()
+	if control == nil || closed {
+		return net.ErrClosed
+	}
+
+	dev.controlWriteMu.Lock()
+	defer dev.controlWriteMu.Unlock()
+	_ = control.SetWriteDeadline(time.Now().Add(controlStreamWait))
+	_, err := io.WriteString(control, command)
+	_ = control.SetWriteDeadline(time.Time{})
+	return err
+}
+
 func (s *Server) EvictDevice(deviceID string) {
+	s.evictDeviceSession(deviceID, nil, true)
+}
+
+// evictDeviceSession removes exactly the expected session when expected is
+// non-nil. This identity check is important for manual disconnects: an old
+// request must never release the port belonging to a freshly reconnected
+// session.
+func (s *Server) evictDeviceSession(deviceID string, expected *DeviceSession, keepGrace bool) bool {
 	s.mu.Lock()
 	dev, exists := s.devices[deviceID]
+	if exists && expected != nil && dev != expected {
+		s.mu.Unlock()
+		return false
+	}
 	if exists {
 		delete(s.devices, deviceID)
 	}
 	s.mu.Unlock()
 
 	if !exists {
-		return
+		return false
 	}
 
-	dev.mu.Lock()
-	if dev.closed {
-		dev.mu.Unlock()
-		return
-	}
-	dev.closed = true
-	dev.info.Status = "DISCONNECTED"
-
-	// Close resources to free OS ports
-	if dev.tcpListener != nil {
-		_ = dev.tcpListener.Close()
-		dev.tcpListener = nil
-	}
-	if dev.yamuxSession != nil {
-		_ = dev.yamuxSession.Close()
-		dev.yamuxSession = nil
-	}
-	if dev.controlStream != nil {
-		_ = dev.controlStream.Close()
-		dev.controlStream = nil
-	}
-	if dev.disconnectTimer != nil {
-		dev.disconnectTimer.Stop()
-		dev.disconnectTimer = nil
+	_, port, _, _, _, _, _ := s.closeDeviceResources(dev, "DISCONNECTED")
+	if keepGrace {
+		// A transport eviction is normally followed by an automatic reconnect;
+		// reserve the same port for that device during the grace period.
+		s.portPool.ReleaseWithGracePeriod(port, deviceID, s.cfg.GracePeriod)
+	} else {
+		s.portPool.Release(port, deviceID)
 	}
 
-	// Manually trigger port release to ensure PortPool state is updated before the new connection acquires it.
-	// The new connection will immediately reclaim this reservation in PortPool.Acquire.
-	s.portPool.ReleaseWithGracePeriod(dev.info.AssignedPort, deviceID, s.cfg.GracePeriod)
-
-	s.logger.Printf("Evicted previous session for device %s to allow rapid reconnect", deviceID)
+	s.logger.Printf("Evicted previous session for device %s", deviceID)
+	return true
 }
 
 // Stop shuts down the server and all device listeners.
@@ -601,22 +813,17 @@ func (s *Server) Stop() error {
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
-
-	for _, dev := range s.devices {
-		dev.mu.Lock()
-		dev.closed = true
-		if dev.tcpListener != nil {
-			_ = dev.tcpListener.Close()
-		}
-		if dev.yamuxSession != nil {
-			_ = dev.yamuxSession.Close()
-		}
-		if dev.disconnectTimer != nil {
-			dev.disconnectTimer.Stop()
-		}
-		dev.mu.Unlock()
+	devices := make([]*DeviceSession, 0, len(s.devices))
+	for id, dev := range s.devices {
+		devices = append(devices, dev)
+		delete(s.devices, id)
 	}
 	s.mu.Unlock()
+
+	for _, dev := range devices {
+		deviceID, port, _, _, _, _, _ := s.closeDeviceResources(dev, "DISCONNECTED")
+		s.portPool.Release(port, deviceID)
+	}
 
 	s.wg.Wait()
 	return nil
