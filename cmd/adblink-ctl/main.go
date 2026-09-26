@@ -16,7 +16,7 @@ import (
 	"github.com/goldenduo/AdbLink/pkg/server"
 )
 
-var version = "1.5.0"
+var version = "1.5.1"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -183,6 +183,7 @@ func cmdPush(args []string) {
 	serverAddr := fs.String("server", "172.17.0.1:8888", "AdbLink server address to connect back to")
 	agentBin := fs.String("bin", "", "Path to adblink-agent binary (auto-detects if empty)")
 	token := fs.String("token", "", "Authentication token")
+	forceTcpip := fs.Bool("tcpip", false, "Force 'adb tcpip 5555' even for wireless connections")
 	_ = fs.Parse(args)
 
 	normServer, _ := normalizeServerAddr(*serverAddr)
@@ -262,8 +263,8 @@ func cmdPush(args []string) {
 	chmodArgs = append(chmodArgs, "shell", "chmod", "+x", remotePath)
 	_ = exec.Command("adb", chmodArgs...).Run()
 
-	// Ensure device adbd is running in TCP mode on port 5555
-	if shouldEnableTcpip5555(*adbSerial) {
+	// Ensure device adbd is running in TCP mode on port 5555 for USB devices (or if -tcpip is forced)
+	if shouldEnableTcpip5555(*adbSerial, *forceTcpip) {
 		fmt.Println("Ensuring device adbd is in TCP mode (adb tcpip 5555)...")
 		tcpipArgs := []string{}
 		if *adbSerial != "" {
@@ -378,6 +379,7 @@ func cmdAuto(args []string) {
 	agentBin := fs.String("bin", "", "Path to adblink-agent binary")
 	token := fs.String("token", "", "Authentication token")
 	webAddr := fs.String("web", "", "AdbLink server Web API URL")
+	forceTcpip := fs.Bool("tcpip", false, "Force 'adb tcpip 5555' even for wireless connections")
 
 	_ = fs.Parse(args)
 
@@ -407,15 +409,9 @@ func cmdAuto(args []string) {
 	}
 	fmt.Printf("[1/5] Target device: %s (%s, ABI: %s)\n", model, targetSerial, abi)
 
-	// Step 2: Enable TCP mode (adb tcpip 5555)
-	if shouldEnableTcpip5555(targetSerial) {
-		if isWirelessTlsDevice(targetSerial) {
-			fmt.Print("[2/5] Wireless TLS device detected, enabling TCP 5555 mode (adb tcpip 5555)... ")
-		} else if isUSBDevice(targetSerial) {
-			fmt.Print("[2/5] Ensuring TCP mode on USB device (adb tcpip 5555)... ")
-		} else {
-			fmt.Print("[2/5] Ensuring TCP 5555 mode on device (adb tcpip 5555)... ")
-		}
+	// Step 2: Enable TCP mode for physical USB devices (adb tcpip 5555)
+	if shouldEnableTcpip5555(targetSerial, *forceTcpip) {
+		fmt.Print("[2/5] Ensuring TCP mode on USB device (adb tcpip 5555)... ")
 		tcpipOut, tcpipErr := exec.Command("adb", "-s", targetSerial, "tcpip", "5555").CombinedOutput()
 		if tcpipErr != nil {
 			fmt.Printf("Notice: %s\n", strings.TrimSpace(string(tcpipOut)))
@@ -429,7 +425,7 @@ func cmdAuto(args []string) {
 			_ = exec.Command("adb", "-s", targetSerial, "reverse", fmt.Sprintf("tcp:%s", serverPort), fmt.Sprintf("tcp:%s", serverPort)).Run()
 		}
 	} else {
-		fmt.Println("[2/5] Device is already connected on TCP 5555, skipping 'adb tcpip'.")
+		fmt.Println("[2/5] Device is connected wirelessly/network, skipping 'adb tcpip' to preserve connection.")
 	}
 	// Step 3: Find agent binary
 	binPath := *agentBin
@@ -485,8 +481,10 @@ func cmdAuto(args []string) {
 		fmt.Printf("Connecting host ADB to %s...\n", connectTarget)
 		_ = exec.Command("adb", "connect", connectTarget).Run()
 	} else {
-		fmt.Println("Agent running in background.")
-		fmt.Printf("Check status with: adblink-ctl list -server %s\n", *webAddr)
+		fmt.Println("Pending.")
+		fmt.Printf("Notice: Device has not registered on server within timeout.\n")
+		fmt.Printf("Check server web dashboard at: %s\n", *webAddr)
+		fmt.Printf("Or inspect device agent log with: adb -s %s shell cat /data/local/tmp/adblink.log\n", targetSerial)
 	}
 
 	fmt.Println("==========================================================")
@@ -495,7 +493,7 @@ func cmdAuto(args []string) {
 		fmt.Println("  You can now unplug USB and run:")
 		fmt.Printf("    adb -s %s shell\n", connectTarget)
 	} else {
-		fmt.Println("✓ Agent deployed and running on device.")
+		fmt.Println("⚠ Incomplete: Device agent has not established reverse tunnel yet.")
 	}
 	fmt.Println("==========================================================")
 }
@@ -631,14 +629,14 @@ func isWirelessTlsDevice(serial string) bool {
 	return strings.Contains(serial, "._tcp") || strings.Contains(serial, "._adb")
 }
 
-func shouldEnableTcpip5555(serial string) bool {
-	if serial == "" {
+func shouldEnableTcpip5555(serial string, force bool) bool {
+	if force {
 		return true
 	}
-	if strings.HasSuffix(serial, ":5555") {
-		return false
-	}
-	return true
+	// Only run 'adb tcpip 5555' for physical USB devices.
+	// Running 'adb tcpip 5555' on wireless devices (mDNS TLS or network) restarts adbd
+	// and abruptly drops the existing wireless connection!
+	return isUSBDevice(serial)
 }
 
 func normalizeServerAddr(addr string) (serverAddr string, webURL string) {

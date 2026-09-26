@@ -7,21 +7,22 @@ import (
 func TestShouldEnableTcpip5555(t *testing.T) {
 	tests := []struct {
 		serial string
+		force  bool
 		want   bool
 	}{
-		{"", true},
-		{"ae20de969904", true}, // USB serial
-		{"adb-ae20de969904-vHcjK3._adb-tls-connect._tcp", true}, // Wireless TLS mDNS
-		{"device-123._adb._tcp", true},
-		{"192.168.1.100:5555", false}, // Already 5555
-		{"10.0.0.5:5555", false},
-		{"192.168.1.100:39485", true}, // Dynamic port wireless
+		{"", false, true},
+		{"ae20de969904", false, true}, // USB serial
+		{"adb-ae20de969904-vHcjK3._adb-tls-connect._tcp", false, false}, // Wireless TLS mDNS -> skip by default!
+		{"adb-ae20de969904-vHcjK3._adb-tls-connect._tcp", true, true},   // Wireless TLS mDNS -> forced
+		{"device-123._adb._tcp", false, false},
+		{"192.168.1.100:5555", false, false}, // Network device -> skip by default
+		{"192.168.1.100:5555", true, true},   // Network device -> forced
 	}
 
 	for _, tt := range tests {
-		got := shouldEnableTcpip5555(tt.serial)
+		got := shouldEnableTcpip5555(tt.serial, tt.force)
 		if got != tt.want {
-			t.Errorf("shouldEnableTcpip5555(%q) = %v; want %v", tt.serial, got, tt.want)
+			t.Errorf("shouldEnableTcpip5555(%q, %v) = %v; want %v", tt.serial, tt.force, got, tt.want)
 		}
 	}
 }
