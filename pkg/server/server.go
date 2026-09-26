@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -268,7 +269,7 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 		Version:       protocol.CurrentProtocolVersion,
 		Status:        protocol.StatusOK,
 		Message:       "Registration successful",
-		ServerVersion: "1.4.0",
+		ServerVersion: "1.5.0",
 		AdvertiseHost: s.cfg.AdvertiseHost,
 	}
 	if err := protocol.WriteMsg(conn, resp); err != nil {
@@ -288,7 +289,7 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 	}
 
 	// Start exposed ADB listener
-	adbListenAddr := fmt.Sprintf("0.0.0.0:%d", assignedPort)
+	adbListenAddr := fmt.Sprintf(":%d", assignedPort)
 	adbListener, err := net.Listen("tcp", adbListenAddr)
 	if err != nil {
 		s.logger.Printf("Failed to bind ADB port %s: %v", adbListenAddr, err)
@@ -298,8 +299,8 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 	}
 
 	devSession := s.registerDeviceSession(req, remoteAddr, assignedPort, session, adbListener)
-	s.logger.Printf("Device registered: %s (model: %s) -> Port %d. Connect via: adb connect %s:%d",
-		req.DeviceID, req.Model, assignedPort, s.cfg.AdvertiseHost, assignedPort)
+	s.logger.Printf("Device registered: %s (model: %s) -> Port %d. Connect via: adb connect %s",
+		req.DeviceID, req.Model, assignedPort, net.JoinHostPort(s.cfg.AdvertiseHost, strconv.Itoa(assignedPort)))
 
 	// Accept and monitor the dedicated control stream from the agent. Keeping
 	// this reader alive is also what lets an explicit web-console disconnect
@@ -332,7 +333,7 @@ func (s *Server) registerDeviceSession(
 			AndroidVersion:   req.AndroidVersion,
 			RemoteAddr:       remoteAddr,
 			AssignedPort:     assignedPort,
-			AdbConnectTarget: fmt.Sprintf("%s:%d", s.cfg.AdvertiseHost, assignedPort),
+			AdbConnectTarget: net.JoinHostPort(s.cfg.AdvertiseHost, strconv.Itoa(assignedPort)),
 			ConnectedAt:      time.Now(),
 			LastSeenAt:       time.Now(),
 			Status:           "ONLINE",

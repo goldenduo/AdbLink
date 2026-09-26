@@ -9,13 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/goldenduo/AdbLink/pkg/server"
 )
 
-var version = "1.4.0"
+var version = "1.5.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -184,6 +185,9 @@ func cmdPush(args []string) {
 	token := fs.String("token", "", "Authentication token")
 	_ = fs.Parse(args)
 
+	normServer, _ := normalizeServerAddr(*serverAddr)
+	*serverAddr = normServer
+
 	// Detect device abi
 	cmdArgs := []string{}
 	if *adbSerial != "" {
@@ -258,8 +262,8 @@ func cmdPush(args []string) {
 	chmodArgs = append(chmodArgs, "shell", "chmod", "+x", remotePath)
 	_ = exec.Command("adb", chmodArgs...).Run()
 
-	// Ensure device adbd is running in TCP mode on port 5555 (critical for non-root real Android phones connected via USB)
-	if isUSBDevice(*adbSerial) {
+	// Ensure device adbd is running in TCP mode on port 5555
+	if shouldEnableTcpip5555(*adbSerial) {
 		fmt.Println("Ensuring device adbd is in TCP mode (adb tcpip 5555)...")
 		tcpipArgs := []string{}
 		if *adbSerial != "" {
@@ -384,19 +388,11 @@ func cmdAuto(args []string) {
 			*serverAddr = pos
 		}
 	}
-
-	// Format server address if port is omitted
-	if !strings.Contains(*serverAddr, ":") {
-		*serverAddr = *serverAddr + ":8888"
-	}
-
-	// Derive Web API URL if not provided
+	// Format and normalize server address & derive Web API URL
+	normServer, defaultWeb := normalizeServerAddr(*serverAddr)
+	*serverAddr = normServer
 	if *webAddr == "" {
-		host, _, err := net.SplitHostPort(*serverAddr)
-		if err != nil {
-			host = *serverAddr
-		}
-		*webAddr = fmt.Sprintf("http://%s:9999", host)
+		*webAddr = defaultWeb
 	}
 
 	fmt.Println("==========================================================")
@@ -411,19 +407,29 @@ func cmdAuto(args []string) {
 	}
 	fmt.Printf("[1/5] Target device: %s (%s, ABI: %s)\n", model, targetSerial, abi)
 
-	// Step 2: Enable TCP mode for physical USB devices (adb tcpip 5555)
-	if isUSBDevice(targetSerial) {
-		fmt.Print("[2/5] Ensuring TCP mode on USB device (adb tcpip 5555)... ")
-		_ = exec.Command("adb", "-s", targetSerial, "tcpip", "5555").Run()
+	// Step 2: Enable TCP mode (adb tcpip 5555)
+	if shouldEnableTcpip5555(targetSerial) {
+		if isWirelessTlsDevice(targetSerial) {
+			fmt.Print("[2/5] Wireless TLS device detected, enabling TCP 5555 mode (adb tcpip 5555)... ")
+		} else if isUSBDevice(targetSerial) {
+			fmt.Print("[2/5] Ensuring TCP mode on USB device (adb tcpip 5555)... ")
+		} else {
+			fmt.Print("[2/5] Ensuring TCP 5555 mode on device (adb tcpip 5555)... ")
+		}
+		tcpipOut, tcpipErr := exec.Command("adb", "-s", targetSerial, "tcpip", "5555").CombinedOutput()
+		if tcpipErr != nil {
+			fmt.Printf("Notice: %s\n", strings.TrimSpace(string(tcpipOut)))
+		} else {
+			fmt.Println("Done")
+		}
 		time.Sleep(1 * time.Second)
-		// If server address is localhost/127.0.0.1, configure adb reverse so USB-connected device can reach host server
+		// If server address is localhost/127.0.0.1/::1, configure adb reverse so device can reach host server
 		serverHost, serverPort, _ := net.SplitHostPort(*serverAddr)
-		if serverHost == "127.0.0.1" || serverHost == "localhost" {
+		if serverHost == "127.0.0.1" || serverHost == "localhost" || serverHost == "::1" {
 			_ = exec.Command("adb", "-s", targetSerial, "reverse", fmt.Sprintf("tcp:%s", serverPort), fmt.Sprintf("tcp:%s", serverPort)).Run()
 		}
-		fmt.Println("Done")
 	} else {
-		fmt.Println("[2/5] Device is connected wirelessly/network, skipping 'adb tcpip' to preserve connection.")
+		fmt.Println("[2/5] Device is already connected on TCP 5555, skipping 'adb tcpip'.")
 	}
 	// Step 3: Find agent binary
 	binPath := *agentBin
@@ -619,4 +625,64 @@ func isUSBDevice(serial string) bool {
 		return false
 	}
 	return true
+}
+
+func isWirelessTlsDevice(serial string) bool {
+	return strings.Contains(serial, "._tcp") || strings.Contains(serial, "._adb")
+}
+
+func shouldEnableTcpip5555(serial string) bool {
+	if serial == "" {
+		return true
+	}
+	if strings.HasSuffix(serial, ":5555") {
+		return false
+	}
+	return true
+}
+
+func normalizeServerAddr(addr string) (serverAddr string, webURL string) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "127.0.0.1:8888", "http://127.0.0.1:9999"
+	}
+	// Already bracketed IPv6: [2001:...]:8888 or [2001:...]
+	if strings.HasPrefix(addr, "[") {
+		if strings.Contains(addr, "]:") {
+			host, _, _ := net.SplitHostPort(addr)
+			return addr, fmt.Sprintf("http://%s", net.JoinHostPort(host, "9999"))
+		}
+		ip := strings.Trim(addr, "[]")
+		return fmt.Sprintf("[%s]:8888", ip), fmt.Sprintf("http://%s", net.JoinHostPort(ip, "9999"))
+	}
+
+
+	// Check if it's an unbracketed IPv6 with multiple colons
+	if strings.Count(addr, ":") > 1 {
+		lastColon := strings.LastIndex(addr, ":")
+		hostPart := addr[:lastColon]
+		portPart := addr[lastColon+1:]
+
+		// Distinguish IP with port (e.g. 2603::1:8888) from IP ending in hextet (e.g. 2603::1)
+		if portNum, err := strconv.Atoi(portPart); err == nil && portNum > 0 && portNum <= 65535 {
+			if parsedHost := net.ParseIP(hostPart); parsedHost != nil {
+				if net.ParseIP(addr) == nil || portNum == 8888 || portNum == 9000 || portNum > 1024 {
+					return fmt.Sprintf("[%s]:%d", hostPart, portNum), fmt.Sprintf("http://%s", net.JoinHostPort(hostPart, "9999"))
+				}
+			}
+		}
+
+		if parsed := net.ParseIP(addr); parsed != nil {
+			return fmt.Sprintf("[%s]:8888", addr), fmt.Sprintf("http://%s", net.JoinHostPort(addr, "9999"))
+		}
+	}
+	// IPv4 or hostname
+	if !strings.Contains(addr, ":") {
+		return addr + ":8888", fmt.Sprintf("http://%s:9999", addr)
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	return addr, fmt.Sprintf("http://%s:9999", host)
 }
