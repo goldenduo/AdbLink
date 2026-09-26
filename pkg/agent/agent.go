@@ -207,7 +207,7 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		AndroidVersion: a.cfg.AndroidVersion,
 		Token:          a.cfg.Token,
 		RequestedPort:  a.cfg.RequestedPort,
-		ClientVersion:  "1.5.1",
+		ClientVersion:  "1.5.2",
 	}
 
 	if err := protocol.WriteMsg(conn, req); err != nil {
@@ -312,7 +312,7 @@ func (a *Agent) acceptStreams(ctx context.Context, session *yamux.Session) error
 func (a *Agent) handleStream(stream *yamux.Stream) {
 	defer stream.Close()
 
-	localConn, err := net.DialTimeout("tcp", a.cfg.LocalAdbAddr, 2*time.Second)
+	localConn, err := a.dialLocalAdb()
 	if err != nil {
 		a.logger.Printf("Failed to connect to local adbd at %s: %v", a.cfg.LocalAdbAddr, err)
 		return
@@ -324,6 +324,71 @@ func (a *Agent) handleStream(stream *yamux.Stream) {
 		a.logger.Printf("Stream forwarding ended with error: %v (local->server: %d, server->local: %d)",
 			err, n1, n2)
 	}
+}
+
+// dialLocalAdb connects to local adbd, with automatic fallback for ROMs like MIUI that block 127.0.0.1 loopback.
+func (a *Agent) dialLocalAdb() (net.Conn, error) {
+	a.mu.Lock()
+	currentAddr := a.cfg.LocalAdbAddr
+	a.mu.Unlock()
+
+	conn, err := net.DialTimeout("tcp", currentAddr, 1*time.Second)
+	if err == nil {
+		return conn, nil
+	}
+
+	// Attempt smart auto-fallback
+	port := "5555"
+	if _, p, splitErr := net.SplitHostPort(currentAddr); splitErr == nil {
+		port = p
+	}
+
+	candidates := []string{
+		net.JoinHostPort("::1", port),
+		net.JoinHostPort("localhost", port),
+	}
+
+	// Add local non-loopback network interface IPs (e.g. wlan0 192.168.x.x)
+	if ifaces, ifErr := net.Interfaces(); ifErr == nil {
+		for _, iface := range ifaces {
+			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			addrs, aErr := iface.Addrs()
+			if aErr != nil {
+				continue
+			}
+			for _, addr := range addrs {
+				var ip net.IP
+				switch v := addr.(type) {
+				case *net.IPNet:
+					ip = v.IP
+				case *net.IPAddr:
+					ip = v.IP
+				}
+				if ip != nil && !ip.IsLoopback() {
+					candidates = append(candidates, net.JoinHostPort(ip.String(), port))
+				}
+			}
+		}
+	}
+
+	for _, cand := range candidates {
+		if cand == currentAddr {
+			continue
+		}
+		if c, cErr := net.DialTimeout("tcp", cand, 500*time.Millisecond); cErr == nil {
+			a.mu.Lock()
+			if a.cfg.LocalAdbAddr != cand {
+				a.logger.Printf("Detected working local adbd at %s (switched from %s)", cand, a.cfg.LocalAdbAddr)
+				a.cfg.LocalAdbAddr = cand
+			}
+			a.mu.Unlock()
+			return c, nil
+		}
+	}
+
+	return nil, err
 }
 
 // Stop shuts down the agent.

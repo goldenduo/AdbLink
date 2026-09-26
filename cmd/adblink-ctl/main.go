@@ -16,7 +16,7 @@ import (
 	"github.com/goldenduo/AdbLink/pkg/server"
 )
 
-var version = "1.5.1"
+var version = "1.5.2"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -282,6 +282,9 @@ func cmdPush(args []string) {
 		runArgs = append(runArgs, "-s", *adbSerial)
 	}
 	runArgs = append(runArgs, "shell", remotePath, "-server", *serverAddr, "-d")
+	if strings.Contains(*adbSerial, ":") && !strings.Contains(*adbSerial, "._") {
+		runArgs = append(runArgs, "-target", *adbSerial)
+	}
 	if *token != "" {
 		runArgs = append(runArgs, "-token", *token)
 	}
@@ -461,6 +464,9 @@ func cmdAuto(args []string) {
 	_ = exec.Command("adb", "-s", targetSerial, "shell", "pkill -9 adblink-agent 2>/dev/null || true").Run()
 
 	launchArgs := []string{"-s", targetSerial, "shell", remotePath, "-server", *serverAddr, "-d"}
+	if strings.Contains(targetSerial, ":") && !strings.Contains(targetSerial, "._") {
+		launchArgs = append(launchArgs, "-target", targetSerial)
+	}
 	if *token != "" {
 		launchArgs = append(launchArgs, "-token", *token)
 	}
