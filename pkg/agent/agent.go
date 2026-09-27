@@ -188,8 +188,7 @@ func (a *Agent) Run(ctx context.Context) error {
 func (a *Agent) connectAndServe(ctx context.Context) error {
 	a.logger.Printf("Connecting to server at %s...", a.cfg.ServerAddr)
 
-	dialer := &net.Dialer{Timeout: a.cfg.DialTimeout}
-	conn, err := dialer.DialContext(ctx, "tcp", a.cfg.ServerAddr)
+	conn, err := a.dialServer(ctx)
 	if err != nil {
 		return fmt.Errorf("dial server failed: %w", err)
 	}
@@ -208,7 +207,7 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		AndroidVersion: a.cfg.AndroidVersion,
 		Token:          a.cfg.Token,
 		RequestedPort:  a.cfg.RequestedPort,
-		ClientVersion:  "1.5.3",
+		ClientVersion:  "1.5.4",
 	}
 
 	if err := protocol.WriteMsg(conn, req); err != nil {

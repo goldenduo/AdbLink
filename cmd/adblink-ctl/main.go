@@ -16,7 +16,7 @@ import (
 	"github.com/goldenduo/AdbLink/pkg/server"
 )
 
-var version = "1.5.3"
+var version = "1.5.4"
 
 func main() {
 	if len(os.Args) < 2 {
