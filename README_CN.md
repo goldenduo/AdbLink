@@ -120,6 +120,21 @@ bin/
 - `-token`：可选安全验证密钥。
 - `-heartbeat`：Yamux 心跳间隔，默认 `15s`，应小于运营商/NAT 的空闲超时时间。
 
+#### IPv6 部署
+
+服务端监听 IPv6 通配地址时使用方括号；`-host` 只填设备和开发机都能访问的 IPv6 主机地址，不带方括号和端口。Agent 的 `-server` 需要把 IPv6 地址放在方括号中：
+
+```bash
+# 将 2001:db8::10 替换为服务端实际可达的 IPv6 地址
+./bin/adblink-server -listen '[::]:8888' -web '[::]:9999' \
+  -host '2001:db8::10' -port-min 55550 -port-max 55599
+
+adb shell /data/local/tmp/adblink-agent \
+  -server '[2001:db8::10]:8888' -retry 2s -max-retry 30s
+```
+
+注册后用 `adb connect '[2001:db8::10]:55550'` 连接分配的端口。Agent 在 TCP/Yamux 会话断开后会自动重连；`-retry` 和 `-max-retry` 分别设置初始与最大重试间隔。路由器或主机防火墙需允许控制端口、Web 端口和 ADB 端口范围通过。
+
 ---
 
 ### 3. 在 Android 手机上运行代理 (`adblink-agent`)

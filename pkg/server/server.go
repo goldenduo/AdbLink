@@ -104,6 +104,13 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.AdvertiseHost == "" {
 		cfg.AdvertiseHost = "127.0.0.1"
 	}
+	// AdvertiseHost is stored as a host literal without port delimiters. Accept
+	// the commonly supplied bracketed form for IPv6, then use JoinHostPort at
+	// every point where an address is emitted.
+	cfg.AdvertiseHost = strings.TrimSpace(cfg.AdvertiseHost)
+	if strings.HasPrefix(cfg.AdvertiseHost, "[") && strings.HasSuffix(cfg.AdvertiseHost, "]") {
+		cfg.AdvertiseHost = cfg.AdvertiseHost[1 : len(cfg.AdvertiseHost)-1]
+	}
 	if cfg.PortMin == 0 {
 		cfg.PortMin = 55550
 	}
@@ -269,7 +276,8 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 		Version:       protocol.CurrentProtocolVersion,
 		Status:        protocol.StatusOK,
 		Message:       "Registration successful",
-		ServerVersion: "1.5.2",
+		AssignedPort:  assignedPort,
+		ServerVersion: "1.5.3",
 		AdvertiseHost: s.cfg.AdvertiseHost,
 	}
 	if err := protocol.WriteMsg(conn, resp); err != nil {

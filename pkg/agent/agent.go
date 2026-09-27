@@ -10,6 +10,7 @@ import (
 	rand "math/rand/v2"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -207,7 +208,7 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		AndroidVersion: a.cfg.AndroidVersion,
 		Token:          a.cfg.Token,
 		RequestedPort:  a.cfg.RequestedPort,
-		ClientVersion:  "1.5.2",
+		ClientVersion:  "1.5.3",
 	}
 
 	if err := protocol.WriteMsg(conn, req); err != nil {
@@ -226,10 +227,14 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		return fmt.Errorf("server rejected registration: [%s] %s", resp.Status, resp.Message)
 	}
 
+	advertiseHost := resp.AdvertiseHost
+	if strings.HasPrefix(advertiseHost, "[") && strings.HasSuffix(advertiseHost, "]") {
+		advertiseHost = advertiseHost[1 : len(advertiseHost)-1]
+	}
+	adbConnectTarget := net.JoinHostPort(advertiseHost, strconv.Itoa(resp.AssignedPort))
 	a.logger.Printf("==> Successfully registered! Server exposed ADB port: %d (Host: %s)",
 		resp.AssignedPort, resp.AdvertiseHost)
-	a.logger.Printf("==> Connect from anywhere: adb connect %s:%d",
-		resp.AdvertiseHost, resp.AssignedPort)
+	a.logger.Printf("==> Connect from anywhere: adb connect %s", adbConnectTarget)
 
 	_ = conn.SetDeadline(time.Time{})
 
