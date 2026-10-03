@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	version = "1.5.4"
+	version = "1.6.0"
 )
 
 func main() {
@@ -32,8 +32,13 @@ func main() {
 	noKeepAwake := flag.Bool("no-keep-awake", false, "Do not apply Android Wi-Fi/Doze keep-awake safeguards")
 	daemonMode := flag.Bool("d", false, "Run in background as a daemon process")
 	daemonModeLong := flag.Bool("daemon", false, "Run in background as a daemon process")
+	proxyAddr := flag.String("proxy", "", "Optional SOCKS5 proxy address (e.g. 127.0.0.1:1080 or 127.0.0.1:7890, auto-detected if empty)")
+	tlsEnabled := flag.Bool("tls", true, "Enable TLS encryption for connection to server (default true)")
+	tlsInsecure := flag.Bool("tls-insecure", true, "Skip TLS certificate verification for self-signed certs (default true)")
+	tlsStrictVerify := flag.Bool("tls-strict-verify", false, "Require valid CA certificate verification (disables insecure mode)")
+	tlsServerName := flag.String("tls-server-name", "", "Custom TLS SNI server name")
+	tlsCA := flag.String("tls-ca", "", "Path to custom CA certificate PEM file")
 	showVersion := flag.Bool("version", false, "Show version and exit")
-
 	flag.Parse()
 
 	if *showVersion {
@@ -72,7 +77,13 @@ func main() {
 		MaxRetryInterval:  *maxRetry,
 		HeartbeatInterval: *heartbeat,
 		DisableKeepAwake:  *noKeepAwake,
-		Logger:            logger,
+		ProxyAddr:         *proxyAddr,
+		DisableTLS:        !*tlsEnabled,
+		TLSEnabled:        *tlsEnabled,
+		TLSInsecure:       *tlsInsecure && !*tlsStrictVerify,
+		TLSStrictVerify:   *tlsStrictVerify,
+		TLSServerName:     *tlsServerName,
+		TLSCAFile:         *tlsCA,
 	}
 
 	ag := agent.NewAgent(agCfg)

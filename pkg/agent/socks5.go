@@ -1,18 +1,27 @@
 package agent
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/goldenduo/AdbLink/pkg/tunnel"
 )
 
 const (
-	localSOCKS5ProxyAddr = "127.0.0.1:1080"
-	socks5ProbeTimeout   = time.Second
+	defaultSOCKS5Port1080 = "127.0.0.1:1080"
+	defaultSOCKS5Port7890 = "127.0.0.1:7890"
+	socks5ProbeTimeout    = 3 * time.Second
 
 	socks5Version       = 5
 	socks5NoAuth        = 0
@@ -22,28 +31,195 @@ const (
 	socks5AddressDomain = 3
 	socks5AddressIPv6   = 4
 )
+var defaultSOCKS5CandidateAddrs = []string{
+	defaultSOCKS5Port1080,
+	defaultSOCKS5Port7890,
+}
+
+func (a *Agent) resolveProxyCandidates() []string {
+	if a.cfg.ProxyAddr != "" {
+		return []string{normalizeProxyAddr(a.cfg.ProxyAddr)}
+	}
+	for _, envKey := range []string{"ALL_PROXY", "all_proxy", "SOCKS5_PROXY", "socks5_proxy"} {
+		if val := strings.TrimSpace(os.Getenv(envKey)); val != "" {
+			return []string{normalizeProxyAddr(val)}
+		}
+	}
+	return defaultSOCKS5CandidateAddrs
+}
+
+func normalizeProxyAddr(addr string) string {
+	addr = strings.TrimSpace(addr)
+	addr = strings.TrimPrefix(addr, "socks5://")
+	addr = strings.TrimPrefix(addr, "socks5h://")
+	addr = strings.TrimPrefix(addr, "http://")
+	addr = strings.TrimPrefix(addr, "https://")
+	return addr
+}
+
 
 // dialServer prefers the local SOCKS5 listener when one responds to a valid
 // SOCKS5 greeting. A non-SOCKS service or a closed port falls back to direct
 // dialing; once a SOCKS5 proxy is identified, failures are returned instead
 // of silently bypassing it.
+func (a *Agent) logPrintf(format string, v ...interface{}) {
+	if a != nil && a.logger != nil {
+		a.logger.Printf(format, v...)
+	}
+}
+
 func (a *Agent) dialServer(ctx context.Context) (net.Conn, error) {
-	proxyConn, proxyDetected, proxyErr := dialSOCKS5(ctx, localSOCKS5ProxyAddr, a.cfg.ServerAddr, a.cfg.DialTimeout)
-	if proxyDetected {
-		if proxyErr != nil {
-			a.logger.Printf("SOCKS5 proxy detected at %s, but proxy connection failed: %v", localSOCKS5ProxyAddr, proxyErr)
-			return nil, proxyErr
+	conn, err := a.dialTransport(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	tunnel.ConfigureTCPConn(conn)
+
+	tlsWanted := !a.cfg.DisableTLS
+	if a.cfg.TLSEnabled {
+		tlsWanted = true
+	}
+	if a.cfg.DisableTLS {
+		tlsWanted = false
+	}
+
+	if tlsWanted {
+		serverName := a.cfg.TLSServerName
+		if serverName == "" {
+			serverName = a.cfg.ServerAddr
 		}
-		a.logger.Printf("SOCKS5 proxy detected at %s; connecting to %s through proxy", localSOCKS5ProxyAddr, a.cfg.ServerAddr)
-		return proxyConn, nil
+		insecure := !a.cfg.TLSStrictVerify
+		if a.cfg.TLSInsecure {
+			insecure = true
+		}
+		tlsConfig, err := tunnel.ClientTLSConfig(insecure, a.cfg.TLSCAFile, serverName)
+		if err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("create TLS client config failed: %w", err)
+		}
+		tlsConn := tls.Client(conn, tlsConfig)
+		handshakeTimeout := a.cfg.DialTimeout
+		if handshakeTimeout <= 0 {
+			handshakeTimeout = 10 * time.Second
+		}
+		handshakeCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+		defer cancel()
+		if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("TLS client handshake failed: %w", err)
+		}
+		a.logPrintf("TLS encryption active (server: %s, SNI: %s, cipher: %s)",
+			a.cfg.ServerAddr, tlsConfig.ServerName, tls.CipherSuiteName(tlsConn.ConnectionState().CipherSuite))
+		return tlsConn, nil
+	}
+
+	return conn, nil
+}
+
+// dialTransport establishes the underlying TCP or proxy connection.
+func (a *Agent) dialTransport(ctx context.Context) (net.Conn, error) {
+	if a.cfg.ProxyAddr != "" {
+		proxyAddr := normalizeProxyAddr(a.cfg.ProxyAddr)
+		// User explicitly configured a proxy. Try SOCKS5 first, then HTTP CONNECT.
+		sConn, sDetected, sErr := dialSOCKS5(ctx, proxyAddr, a.cfg.ServerAddr, a.cfg.DialTimeout)
+		if sDetected && sErr == nil {
+			a.logPrintf("Connecting to %s through explicitly configured SOCKS5 proxy %s", a.cfg.ServerAddr, proxyAddr)
+			return sConn, nil
+		}
+		hConn, hDetected, hErr := dialHTTPProxy(ctx, proxyAddr, a.cfg.ServerAddr, a.cfg.DialTimeout)
+		if hDetected && hErr == nil {
+			a.logPrintf("Connecting to %s through explicitly configured HTTP proxy %s", a.cfg.ServerAddr, proxyAddr)
+			return hConn, nil
+		}
+		if sErr != nil {
+			return nil, fmt.Errorf("configured proxy %s failed: %w", proxyAddr, sErr)
+		}
+		if hErr != nil {
+			return nil, fmt.Errorf("configured HTTP proxy %s failed: %w", proxyAddr, hErr)
+		}
+		return nil, fmt.Errorf("unable to connect through configured proxy %s", proxyAddr)
+	}
+
+	candidates := a.resolveProxyCandidates()
+	for _, proxyAddr := range candidates {
+		proxyConn, proxyDetected, proxyErr := dialSOCKS5(ctx, proxyAddr, a.cfg.ServerAddr, a.cfg.DialTimeout)
+		if proxyDetected {
+			if proxyErr != nil {
+				a.logPrintf("SOCKS5 proxy detected at %s, but proxy connection failed: %v", proxyAddr, proxyErr)
+				return nil, proxyErr
+			}
+			a.logPrintf("SOCKS5 proxy detected at %s; connecting to %s through proxy", proxyAddr, a.cfg.ServerAddr)
+			return proxyConn, nil
+		}
+
+		// Try HTTP CONNECT proxy if SOCKS5 was not detected on that port
+		httpConn, httpDetected, httpErr := dialHTTPProxy(ctx, proxyAddr, a.cfg.ServerAddr, a.cfg.DialTimeout)
+		if httpDetected {
+			if httpErr != nil {
+				a.logPrintf("HTTP proxy detected at %s, but proxy connection failed: %v", proxyAddr, httpErr)
+				return nil, httpErr
+			}
+			a.logPrintf("HTTP proxy detected at %s; connecting to %s through proxy", proxyAddr, a.cfg.ServerAddr)
+			return httpConn, nil
+		}
+
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	a.logger.Printf("No SOCKS5 proxy detected at %s; connecting directly to %s", localSOCKS5ProxyAddr, a.cfg.ServerAddr)
+	a.logPrintf("No proxy detected at %s; connecting directly to %s", strings.Join(candidates, " or "), a.cfg.ServerAddr)
 	dialer := &net.Dialer{Timeout: a.cfg.DialTimeout}
 	return dialer.DialContext(ctx, "tcp", a.cfg.ServerAddr)
+}
+
+// dialHTTPProxy opens an HTTP CONNECT tunnel to targetAddr.
+func dialHTTPProxy(ctx context.Context, proxyAddr, targetAddr string, timeout time.Duration) (conn net.Conn, detected bool, err error) {
+	probeTimeout := timeout
+	if probeTimeout <= 0 || probeTimeout > socks5ProbeTimeout {
+		probeTimeout = socks5ProbeTimeout
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	dialer := &net.Dialer{Timeout: probeTimeout}
+	c, err := dialer.DialContext(probeCtx, "tcp", proxyAddr)
+	if err != nil {
+		return nil, false, err
+	}
+
+	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: AdbLink\r\nProxy-Connection: Keep-Alive\r\n\r\n", targetAddr, targetAddr)
+	_ = c.SetDeadline(time.Now().Add(probeTimeout))
+	if _, err := io.WriteString(c, req); err != nil {
+		_ = c.Close()
+		return nil, false, err
+	}
+
+	br := bufio.NewReader(c)
+	resp, err := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
+	_ = c.SetDeadline(time.Time{})
+	if err != nil {
+		_ = c.Close()
+		return nil, false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		if br.Buffered() > 0 {
+			return tunnel.NewPeekConn(c, br), true, nil
+		}
+		return c, true, nil
+	}
+
+	_ = c.Close()
+	if resp.StatusCode == http.StatusProxyAuthRequired || (resp.StatusCode >= 400 && resp.StatusCode < 600) {
+		return nil, true, fmt.Errorf("HTTP proxy returned %s", resp.Status)
+	}
+	return nil, false, errors.New("not an HTTP proxy")
 }
 
 // dialSOCKS5 checks the listener with a SOCKS5 greeting and, if it supports

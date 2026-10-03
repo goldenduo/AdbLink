@@ -2,6 +2,8 @@ package server
 
 import (
 	"bufio"
+	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -25,7 +27,7 @@ var (
 )
 
 const (
-	controlStreamWait = 2 * time.Second
+	controlStreamWait = 10 * time.Second
 	stopRequestTTL    = 30 * time.Second
 )
 
@@ -38,6 +40,11 @@ type Config struct {
 	Token             string        // Shared secret auth token (optional)
 	GracePeriod       time.Duration // Reconnection grace period (e.g. 30s)
 	HeartbeatInterval time.Duration // Yamux heartbeat interval
+	DisableTLS        bool          // Set to true to disable TLS (TLS is enabled by default)
+	TLSEnabled        bool          // Explicit flag to enable TLS (enabled by default)
+	TLSCertFile       string        // Optional TLS certificate file
+	TLSKeyFile        string        // Optional TLS private key file
+	TLSStrict         bool          // Reject non-TLS connections
 	Logger            *log.Logger
 }
 
@@ -94,8 +101,8 @@ type Server struct {
 	closed         bool
 	shutdownChan   chan struct{}
 	wg             sync.WaitGroup
+	tlsConfig      *tls.Config
 }
-
 // NewServer creates a new AdbLink Server.
 func NewServer(cfg Config) (*Server, error) {
 	if cfg.ListenAddr == "" {
@@ -131,6 +138,23 @@ func NewServer(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create port pool: %w", err)
 	}
+	var tlsCfg *tls.Config
+	tlsWanted := !cfg.DisableTLS
+	if cfg.TLSEnabled {
+		tlsWanted = true
+	}
+	if cfg.DisableTLS {
+		tlsWanted = false
+	}
+	if tlsWanted || cfg.TLSCertFile != "" {
+		hosts := []string{cfg.AdvertiseHost, "localhost", "127.0.0.1"}
+		var tlsErr error
+		tlsCfg, tlsErr = tunnel.ServerTLSConfig(cfg.TLSCertFile, cfg.TLSKeyFile, hosts...)
+		if tlsErr != nil {
+			return nil, fmt.Errorf("failed to configure server TLS: %w", tlsErr)
+		}
+		cfg.Logger.Printf("TLS support enabled by default (auto-detecting TLS/plain, strict: %v)", cfg.TLSStrict)
+	}
 
 	return &Server{
 		cfg:          cfg,
@@ -139,6 +163,7 @@ func NewServer(cfg Config) (*Server, error) {
 		devices:      make(map[string]*DeviceSession),
 		stopRequests: make(map[string]time.Time),
 		shutdownChan: make(chan struct{}),
+		tlsConfig:    tlsCfg,
 	}, nil
 }
 
@@ -196,8 +221,26 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 	s.logger.Printf("Incoming connection from %s", remoteAddr)
 	tunnel.ConfigureTCPConn(conn)
 
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	// If server has TLS configured, detect whether incoming conn is TLS or plaintext
+	if s.tlsConfig != nil {
+		detectedConn, isTLS, err := tunnel.DetectAndHandleTLS(context.Background(), conn, s.tlsConfig, 5*time.Second)
+		if err != nil {
+			s.logger.Printf("TLS detection/handshake failed from %s: %v", remoteAddr, err)
+			_ = conn.Close()
+			return
+		}
+		if s.cfg.TLSStrict && !isTLS {
+			s.logger.Printf("Rejecting non-TLS connection from %s in strict TLS mode", remoteAddr)
+			_ = detectedConn.Close()
+			return
+		}
+		if isTLS {
+			s.logger.Printf("Secure TLS connection established from %s", remoteAddr)
+		}
+		conn = detectedConn
+	}
 
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	var req protocol.RegisterRequest
 	if err := protocol.ReadMsg(conn, &req); err != nil {
 		s.logger.Printf("Failed to read register request from %s: %v", remoteAddr, err)
@@ -277,7 +320,7 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 		Status:        protocol.StatusOK,
 		Message:       "Registration successful",
 		AssignedPort:  assignedPort,
-		ServerVersion: "1.5.4",
+		ServerVersion: "1.6.0",
 		AdvertiseHost: s.cfg.AdvertiseHost,
 	}
 	if err := protocol.WriteMsg(conn, resp); err != nil {
@@ -432,6 +475,7 @@ func (s *Server) runControlHeartbeat(dev *DeviceSession) {
 	ticker := time.NewTicker(s.cfg.HeartbeatInterval)
 	defer ticker.Stop()
 
+	failCount := 0
 	for {
 		select {
 		case <-s.shutdownChan:
@@ -440,10 +484,18 @@ func (s *Server) runControlHeartbeat(dev *DeviceSession) {
 			return
 		case <-ticker.C:
 			if atomic.LoadInt64(&dev.activeStreams) > 0 {
+				failCount = 0
 				continue
 			}
 			if err := s.sendControlCommand(dev, "PING\n"); err != nil {
-				return
+				failCount++
+				s.logger.Printf("Control heartbeat PING failed for device %s (attempt %d/3): %v",
+					dev.info.DeviceID, failCount, err)
+				if failCount >= 3 {
+					return
+				}
+			} else {
+				failCount = 0
 			}
 		}
 	}

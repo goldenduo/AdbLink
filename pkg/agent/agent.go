@@ -39,6 +39,13 @@ type Config struct {
 	DialTimeout       time.Duration // Server dial timeout
 	HeartbeatInterval time.Duration // Yamux heartbeat interval
 	DisableKeepAwake  bool          // Disable Android best-effort network/power keep-awake
+	ProxyAddr         string        // Optional SOCKS5 proxy address (auto-probed if empty)
+	DisableTLS        bool          // Set to true to disable TLS (TLS is enabled by default)
+	TLSEnabled        bool          // Explicit flag to enable TLS (enabled by default)
+	TLSInsecure       bool          // Skip TLS certificate verification (default true unless TLSStrictVerify)
+	TLSStrictVerify   bool          // Set to true to require strict CA verification
+	TLSServerName     string        // Custom TLS Server Name Indication (SNI)
+	TLSCAFile         string        // Optional trusted CA certificate file
 	Logger            *log.Logger
 }
 
@@ -207,7 +214,7 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		AndroidVersion: a.cfg.AndroidVersion,
 		Token:          a.cfg.Token,
 		RequestedPort:  a.cfg.RequestedPort,
-		ClientVersion:  "1.5.4",
+		ClientVersion:  "1.6.0",
 	}
 
 	if err := protocol.WriteMsg(conn, req); err != nil {
@@ -425,7 +432,7 @@ func (a *Agent) listenControlCommands(stream net.Conn) error {
 		switch cmd {
 		case "STOP":
 			a.logger.Printf("[AdbLink-Agent] Received STOP command from server. Shutting down...")
-			_ = stream.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			_ = stream.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			_, _ = io.WriteString(stream, "STOP_ACK\n")
 			_ = stream.SetWriteDeadline(time.Time{})
 			a.mu.Lock()
@@ -437,7 +444,7 @@ func (a *Agent) listenControlCommands(stream net.Conn) error {
 			// PONG is only an idle-health hint; a delayed response must not
 			// tear down an otherwise valid ADB session. Yamux's own heartbeat
 			// remains authoritative for transport failure detection.
-			_ = stream.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			_ = stream.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			_, _ = io.WriteString(stream, "PONG\n")
 			_ = stream.SetWriteDeadline(time.Time{})
 		}

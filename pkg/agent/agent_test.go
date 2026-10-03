@@ -300,3 +300,94 @@ func waitForDeviceStatus(t *testing.T, srv *server.Server, deviceID, status stri
 	}
 	return false
 }
+func TestAgentServerTLSTunnel(t *testing.T) {
+	mockAdbdListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start mock adbd: %v", err)
+	}
+	defer mockAdbdListener.Close()
+	mockAdbdAddr := mockAdbdListener.Addr().String()
+
+	go func() {
+		for {
+			conn, err := mockAdbdListener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 1024)
+				n, err := c.Read(buf)
+				if err != nil {
+					return
+				}
+				resp := append([]byte("SECURE_TLS_REPLY:"), buf[:n]...)
+				_, _ = c.Write(resp)
+			}(conn)
+		}
+	}()
+
+	serverCfg := server.Config{
+		ListenAddr:        "127.0.0.1:0",
+		AdvertiseHost:     "127.0.0.1",
+		PortMin:           48000,
+		PortMax:           48010,
+		TLSEnabled:        true,
+		HeartbeatInterval: 20 * time.Millisecond,
+		Logger:            log.New(io.Discard, "", 0),
+	}
+	srv, err := server.NewServer(serverCfg)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed to start server: %v", err)
+	}
+	defer srv.Stop()
+
+	agentCfg := Config{
+		ServerAddr:     srv.GetListenAddr(),
+		DeviceID:       "tls-test-device-001",
+		Model:          "TLSTestPhone",
+		AndroidVersion: "15",
+		LocalAdbAddr:   mockAdbdAddr,
+		TLSEnabled:     true,
+		TLSInsecure:    true,
+		Logger:         log.New(io.Discard, "", 0),
+	}
+	ag := NewAgent(agentCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = ag.Run(ctx)
+	}()
+
+	var devInfo server.DeviceInfo
+	if !waitForDeviceStatus(t, srv, "tls-test-device-001", "ONLINE", 3*time.Second, &devInfo) {
+		t.Fatalf("TLS device did not register in time")
+	}
+
+	adbClientConn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", devInfo.AssignedPort), 2*time.Second)
+	if err != nil {
+		t.Fatalf("failed to connect to TLS exposed ADB port: %v", err)
+	}
+	defer adbClientConn.Close()
+
+	if _, err := adbClientConn.Write([]byte("PING_OVER_TLS")); err != nil {
+		t.Fatalf("failed to send data through TLS ADB port: %v", err)
+	}
+
+	replyBuf := make([]byte, 1024)
+	_ = adbClientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := adbClientConn.Read(replyBuf)
+	if err != nil {
+		t.Fatalf("read reply from TLS adb port failed: %v", err)
+	}
+
+	expected := "SECURE_TLS_REPLY:PING_OVER_TLS"
+	if string(replyBuf[:n]) != expected {
+		t.Fatalf("unexpected reply: got %s, want %s", string(replyBuf[:n]), expected)
+	}
+}

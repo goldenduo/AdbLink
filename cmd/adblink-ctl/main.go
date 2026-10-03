@@ -16,7 +16,7 @@ import (
 	"github.com/goldenduo/AdbLink/pkg/server"
 )
 
-var version = "1.5.4"
+var version = "1.6.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -183,6 +183,8 @@ func cmdPush(args []string) {
 	serverAddr := fs.String("server", "172.17.0.1:8888", "AdbLink server address to connect back to")
 	agentBin := fs.String("bin", "", "Path to adblink-agent binary (auto-detects if empty)")
 	token := fs.String("token", "", "Authentication token")
+	tlsEnabled := fs.Bool("tls", true, "Enable TLS encryption on agent (default true)")
+	tlsInsecure := fs.Bool("tls-insecure", true, "Skip TLS cert verification on agent (default true)")
 	forceTcpip := fs.Bool("tcpip", false, "Force 'adb tcpip 5555' even for wireless connections")
 	_ = fs.Parse(args)
 
@@ -288,7 +290,12 @@ func cmdPush(args []string) {
 	if *token != "" {
 		runArgs = append(runArgs, "-token", *token)
 	}
-
+	if *tlsEnabled || *tlsInsecure {
+		runArgs = append(runArgs, "-tls")
+	}
+	if *tlsInsecure {
+		runArgs = append(runArgs, "-tls-insecure")
+	}
 	out, err = exec.Command("adb", runArgs...).CombinedOutput()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start agent: %s\n", string(out))
@@ -381,9 +388,10 @@ func cmdAuto(args []string) {
 	adbSerial := fs.String("s", "", "Target ADB device serial")
 	agentBin := fs.String("bin", "", "Path to adblink-agent binary")
 	token := fs.String("token", "", "Authentication token")
+	tlsEnabled := fs.Bool("tls", true, "Enable TLS encryption on agent (default true)")
+	tlsInsecure := fs.Bool("tls-insecure", true, "Skip TLS cert verification on agent (default true)")
 	webAddr := fs.String("web", "", "AdbLink server Web API URL")
 	forceTcpip := fs.Bool("tcpip", false, "Force 'adb tcpip 5555' even for wireless connections")
-
 	_ = fs.Parse(args)
 
 	// If positional argument provided without flag (e.g. 'adblink-ctl 1.2.3.4:8888')
@@ -469,6 +477,12 @@ func cmdAuto(args []string) {
 	}
 	if *token != "" {
 		launchArgs = append(launchArgs, "-token", *token)
+	}
+	if *tlsEnabled || *tlsInsecure {
+		launchArgs = append(launchArgs, "-tls")
+	}
+	if *tlsInsecure {
+		launchArgs = append(launchArgs, "-tls-insecure")
 	}
 	if out, err := exec.Command("adb", launchArgs...).CombinedOutput(); err != nil {
 		fmt.Println("Failed")

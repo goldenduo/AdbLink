@@ -119,7 +119,24 @@ Flags:
 - `-port-min` / `-port-max`: Port range allocated to connected devices.
 - `-token`: Optional authentication token.
 - `-heartbeat`: Yamux heartbeat interval (default `15s`). Keep this below the idle timeout of the carrier/NAT in use.
+- `-tls`: Enable TLS encryption on control port (default `true`, auto-detects TLS vs plaintext, auto-generates self-signed certificate if none provided).
+- `-tls-cert` / `-tls-key`: Optional path to custom TLS certificate and key files.
+- `-tls-strict`: Require TLS encryption (reject non-TLS connections).
 
+#### Secure Transport & Long-Lived Public Network Resilience (Default TLS 1.3 & Proxy Support)
+
+In complex public networks, multi-carrier links, or long-distance topologies, plaintext persistent connections can encounter middlebox inspection, protocol misclassification, or idle connection resets. AdbLink provides end-to-end TLS 1.3 transport encryption enabled by default:
+
+```bash
+# Server automatically enables TLS and generates certificates:
+./bin/adblink-server -listen :8888 -web :9999 -host <remote_server_ip>
+
+# Agent on phone connects with TLS 1.3 encryption by default:
+adb shell /data/local/tmp/adblink-agent -server <remote_server_ip>:8888 -d
+
+# Optional: through local proxy (Clash / v2rayNG on phone):
+adb shell /data/local/tmp/adblink-agent -server <remote_server_ip>:8888 -proxy 127.0.0.1:1080 -d
+```
 ---
 
 ### 3. Deploy Agent onto Android Phone

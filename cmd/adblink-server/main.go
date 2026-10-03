@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	version = "1.5.4"
+	version = "1.6.0"
 )
 
 func main() {
@@ -28,8 +28,11 @@ func main() {
 	gracePeriod := flag.Duration("grace", 30*time.Second, "Grace period to hold port reservation on disconnect")
 	heartbeat := flag.Duration("heartbeat", tunnel.DefaultHeartbeatInterval, "Yamux heartbeat interval")
 	dataDir := flag.String("data-dir", "data", "Directory to store persistent data and auth credentials")
+	enableTLS := flag.Bool("tls", true, "Enable TLS on control port (auto-detects TLS vs plaintext, generates cert if empty)")
+	tlsCert := flag.String("tls-cert", "", "Optional path to TLS certificate PEM file")
+	tlsKey := flag.String("tls-key", "", "Optional path to TLS private key PEM file")
+	tlsStrict := flag.Bool("tls-strict", false, "Reject non-TLS connections (require TLS)")
 	showVersion := flag.Bool("version", false, "Show version and exit")
-
 	flag.Parse()
 
 	if *showVersion {
@@ -55,6 +58,10 @@ func main() {
 		Token:             *token,
 		GracePeriod:       *gracePeriod,
 		HeartbeatInterval: *heartbeat,
+		TLSEnabled:        *enableTLS,
+		TLSCertFile:       *tlsCert,
+		TLSKeyFile:        *tlsKey,
+		TLSStrict:         *tlsStrict,
 		Logger:            logger,
 	}
 
