@@ -29,6 +29,7 @@ type androidPowerKeeper struct {
 	hasStayOnSetting       bool
 	restoreDeviceIdle      bool
 	termuxWakeLockAcquired bool
+	batteryFaked           bool
 }
 
 func newPowerKeeper(logger *log.Logger) *androidPowerKeeper {
@@ -85,11 +86,16 @@ func (p *androidPowerKeeper) Start() error {
 	_ = runAndroidCommand("dumpsys", "deviceidle", "whitelist", "+com.android.shell")
 	_ = runAndroidCommand("cmd", "appops", "set", "com.android.shell", "RUN_IN_BACKGROUND", "allow")
 	_ = runAndroidCommand("cmd", "appops", "set", "com.android.shell", "WAKE_LOCK", "allow")
-	// svc power stayon applies to plugged-in states on Android. It is useful
-	// when a phone is deployed on USB power, and the original setting is restored
-	// when the agent exits.
+	// Simulate AC power so Android BatteryService stays in plugged-in state even when on battery.
+	// This ensures stay_on_while_plugged_in and network keep-alive policies remain active when unplugged.
+	if err := runAndroidCommand("dumpsys", "battery", "set", "ac", "1"); err == nil {
+		p.batteryFaked = true
+	}
+
+	// svc power stayon applies to plugged-in states on Android. Combined with the simulated AC power above,
+	// this prevents CPU sleep and Wi-Fi disconnect even when physically running on battery.
 	if err := runAndroidCommand("svc", "power", "stayon", "true"); err != nil {
-		p.logger.Printf("keep-awake: unable to set plugged-in stay-awake policy: %v", err)
+		p.logger.Printf("keep-awake: unable to set stay-awake policy: %v", err)
 	}
 
 	// Termux exposes a real partial wakelock on devices where it is installed.
@@ -143,6 +149,9 @@ func (p *androidPowerKeeper) Stop() error {
 		}
 	}
 
+	if p.batteryFaked {
+		_ = runAndroidCommand("dumpsys", "battery", "reset")
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("%v", errs)
 	}
