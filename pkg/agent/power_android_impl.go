@@ -73,6 +73,18 @@ func (p *androidPowerKeeper) Start() error {
 		p.logger.Printf("keep-awake: unable to set Wi-Fi sleep policy: %v", err)
 	}
 
+	// Disable Wi-Fi power saving and suspend optimizations so Wi-Fi never drops on screen off
+	_ = runAndroidCommand("settings", "put", "global", "wifi_power_save", "0")
+	_ = runAndroidCommand("settings", "put", "global", "wifi_suspend_optimizations_enabled", "0")
+	_ = runAndroidCommand("settings", "put", "global", "wifi_idle_ms", "0")
+	_ = runAndroidCommand("settings", "put", "global", "wifi_scan_always_enabled", "1")
+	_ = runAndroidCommand("settings", "put", "global", "wifi_watchdog_on", "0")
+	_ = runAndroidCommand("settings", "put", "global", "wifi_watchdog_poor_network_test_enabled", "0")
+
+	// Whitelist shell process from battery optimizations and grant background/wakelock permissions
+	_ = runAndroidCommand("dumpsys", "deviceidle", "whitelist", "+com.android.shell")
+	_ = runAndroidCommand("cmd", "appops", "set", "com.android.shell", "RUN_IN_BACKGROUND", "allow")
+	_ = runAndroidCommand("cmd", "appops", "set", "com.android.shell", "WAKE_LOCK", "allow")
 	// svc power stayon applies to plugged-in states on Android. It is useful
 	// when a phone is deployed on USB power, and the original setting is restored
 	// when the agent exits.
