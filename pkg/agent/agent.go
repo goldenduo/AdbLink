@@ -216,7 +216,7 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		AndroidVersion: a.cfg.AndroidVersion,
 		Token:          a.cfg.Token,
 		RequestedPort:  a.cfg.RequestedPort,
-		ClientVersion:  "1.6.1",
+		ClientVersion:  "1.6.2",
 	}
 
 	if err := protocol.WriteMsg(conn, req); err != nil {
@@ -409,7 +409,54 @@ func (a *Agent) dialLocalAdb() (net.Conn, error) {
 		}
 	}
 
+	// If fixed port failed, auto-discover any dynamic adbd port (e.g. Android Wireless Debugging)
+	if dynPort := findAdbdListeningPort(); dynPort != "" && dynPort != port {
+		dynCandidates := []string{
+			net.JoinHostPort("127.0.0.1", dynPort),
+			net.JoinHostPort("localhost", dynPort),
+			net.JoinHostPort("::1", dynPort),
+		}
+		for _, cand := range dynCandidates {
+			if c, cErr := net.DialTimeout("tcp", cand, 500*time.Millisecond); cErr == nil {
+				a.mu.Lock()
+				a.logger.Printf("Auto-discovered active adbd port %s at %s (switched from %s)", dynPort, cand, a.cfg.LocalAdbAddr)
+				a.cfg.LocalAdbAddr = cand
+				a.mu.Unlock()
+				return c, nil
+			}
+		}
+	}
+
 	return nil, err
+}
+
+// findAdbdListeningPort scans /proc/net/tcp and /proc/net/tcp6 for listening sockets owned by UID 2000 (AID_SHELL).
+func findAdbdListeningPort() string {
+	for _, path := range []string{"/proc/net/tcp6", "/proc/net/tcp"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines[1:] {
+			fields := strings.Fields(line)
+			if len(fields) < 8 {
+				continue
+			}
+			// fields[1] is local_address (ip:hex_port)
+			// fields[3] is st (0A = TCP_LISTEN)
+			// fields[7] is uid (2000 = AID_SHELL)
+			if fields[3] == "0A" && (fields[7] == "2000" || fields[7] == "0") {
+				parts := strings.Split(fields[1], ":")
+				if len(parts) == 2 {
+					if portNum, parseErr := strconv.ParseInt(parts[1], 16, 32); parseErr == nil && portNum > 0 {
+						return strconv.Itoa(int(portNum))
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // Stop shuts down the agent.
