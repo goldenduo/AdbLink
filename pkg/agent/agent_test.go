@@ -391,3 +391,61 @@ func TestAgentServerTLSTunnel(t *testing.T) {
 		t.Fatalf("unexpected reply: got %s, want %s", string(replyBuf[:n]), expected)
 	}
 }
+func TestAgentHeartbeatTimeoutTriggersReconnect(t *testing.T) {
+	serverCfg := server.Config{
+		ListenAddr:        "127.0.0.1:0",
+		AdvertiseHost:     "127.0.0.1",
+		PortMin:           49000,
+		PortMax:           49010,
+		HeartbeatInterval: 20 * time.Millisecond,
+		Logger:            log.New(io.Discard, "", 0),
+	}
+	srv, err := server.NewServer(serverCfg)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed to start server: %v", err)
+	}
+
+	agentCfg := Config{
+		ServerAddr:        srv.GetListenAddr(),
+		DeviceID:          "heartbeat-test-device",
+		Model:             "HeartbeatPhone",
+		HeartbeatInterval: 20 * time.Millisecond,
+		RetryInterval:     20 * time.Millisecond,
+		MaxRetryInterval:  50 * time.Millisecond,
+		Logger:            log.New(io.Discard, "", 0),
+	}
+	ag := NewAgent(agentCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = ag.Run(ctx)
+	}()
+
+	var first server.DeviceInfo
+	if !waitForDeviceStatus(t, srv, "heartbeat-test-device", "ONLINE", 3*time.Second, &first) {
+		t.Fatalf("device did not register in time")
+	}
+
+	// Evict the device from server without STOP to test active heartbeat detection and reconnect
+	srv.EvictDevice("heartbeat-test-device")
+
+	var second server.DeviceInfo
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if info, ok := srv.GetDevice("heartbeat-test-device"); ok && info.Status == "ONLINE" && info.ConnectedAt.After(first.ConnectedAt) {
+			second = info
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if second.Status != "ONLINE" {
+		t.Fatal("agent failed to auto-reconnect after heartbeat failure/eviction")
+	}
+	_ = srv.Stop()
+}

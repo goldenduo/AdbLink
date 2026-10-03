@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +46,8 @@ type Config struct {
 	TLSCertFile       string        // Optional TLS certificate file
 	TLSKeyFile        string        // Optional TLS private key file
 	TLSStrict         bool          // Reject non-TLS connections
+	DisableAutoAdbConnect bool      // Set to true to disable automatic 'adb connect' on the server
+	AutoAdbConnect        bool      // Explicit flag to enable automatic 'adb connect'
 	Logger            *log.Logger
 }
 
@@ -320,7 +323,7 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 		Status:        protocol.StatusOK,
 		Message:       "Registration successful",
 		AssignedPort:  assignedPort,
-		ServerVersion: "1.6.0",
+		ServerVersion: "1.6.1",
 		AdvertiseHost: s.cfg.AdvertiseHost,
 	}
 	if err := protocol.WriteMsg(conn, resp); err != nil {
@@ -360,9 +363,13 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 
 	// Run ADB forwarding loop
 	go s.runAdbForwardingLoop(devSession)
-
 	// Monitor yamux session for disconnect
 	go s.monitorSession(devSession)
+
+	// Automatically run adb connect on the server if enabled
+	if !s.cfg.DisableAutoAdbConnect {
+		go s.autoAdbConnect(devSession, assignedPort)
+	}
 }
 
 // registerDeviceSession stores or updates the device session in registry.
@@ -463,6 +470,11 @@ func (s *Server) acceptControlStream(dev *DeviceSession) {
 			dev.mu.Lock()
 			dev.info.LastSeenAt = time.Now()
 			dev.mu.Unlock()
+		case "PING":
+			dev.mu.Lock()
+			dev.info.LastSeenAt = time.Now()
+			dev.mu.Unlock()
+			_ = s.sendControlCommand(dev, "PONG\n")
 		}
 	}
 }
@@ -659,6 +671,9 @@ func (s *Server) closeDeviceResources(dev *DeviceSession, status string) (device
 	}
 	if timer != nil {
 		timer.Stop()
+	}
+	if !s.cfg.DisableAutoAdbConnect && port > 0 {
+		go s.autoAdbDisconnect(port)
 	}
 	return
 }
@@ -888,4 +903,24 @@ func (s *Server) Stop() error {
 
 	s.wg.Wait()
 	return nil
+}
+func (s *Server) autoAdbConnect(dev *DeviceSession, port int) {
+	time.Sleep(150 * time.Millisecond)
+	target := fmt.Sprintf("127.0.0.1:%d", port)
+	s.logger.Printf("[Auto-Adb] Connecting server local adb to %s (device: %s)...", target, dev.info.DeviceID)
+
+	cmd := exec.Command("adb", "connect", target)
+	out, err := cmd.CombinedOutput()
+	outputStr := strings.TrimSpace(string(out))
+	if err != nil {
+		s.logger.Printf("[Auto-Adb] Notice: 'adb connect %s' failed: %v (output: %s)", target, err, outputStr)
+		return
+	}
+	s.logger.Printf("[Auto-Adb] Successfully connected to %s: %s", target, outputStr)
+}
+
+func (s *Server) autoAdbDisconnect(port int) {
+	target := fmt.Sprintf("127.0.0.1:%d", port)
+	cmd := exec.Command("adb", "disconnect", target)
+	_ = cmd.Run()
 }

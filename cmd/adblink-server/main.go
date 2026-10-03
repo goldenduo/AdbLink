@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	version = "1.6.0"
+	version = "1.6.1"
 )
 
 func main() {
@@ -32,6 +32,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "Optional path to TLS certificate PEM file")
 	tlsKey := flag.String("tls-key", "", "Optional path to TLS private key PEM file")
 	tlsStrict := flag.Bool("tls-strict", false, "Reject non-TLS connections (require TLS)")
+	autoConnect := flag.Bool("auto-connect", true, "Automatically execute 'adb connect 127.0.0.1:<port>' upon device registration (default true)")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	flag.Parse()
 
@@ -62,6 +63,8 @@ func main() {
 		TLSCertFile:       *tlsCert,
 		TLSKeyFile:        *tlsKey,
 		TLSStrict:         *tlsStrict,
+		DisableAutoAdbConnect: !*autoConnect,
+		AutoAdbConnect:    *autoConnect,
 		Logger:            logger,
 	}
 

@@ -13,8 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
-
 	"github.com/goldenduo/AdbLink/pkg/protocol"
 	"github.com/goldenduo/AdbLink/pkg/tunnel"
 	"github.com/hashicorp/yamux"
@@ -51,14 +51,16 @@ type Config struct {
 
 // Agent is the native proxy running on Android.
 type Agent struct {
-	cfg           Config
-	logger        *log.Logger
-	mu            sync.Mutex
-	session       *yamux.Session
-	closed        bool
-	remoteStopped bool
-	sessionReady  bool
-	cancelFunc    context.CancelFunc
+	cfg            Config
+	logger         *log.Logger
+	mu             sync.Mutex
+	session        *yamux.Session
+	closed         bool
+	remoteStopped  bool
+	sessionReady   bool
+	cancelFunc     context.CancelFunc
+	controlWriteMu sync.Mutex
+	lastServerSeen atomic.Int64
 }
 
 // NewAgent creates a new Agent instance.
@@ -214,7 +216,7 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		AndroidVersion: a.cfg.AndroidVersion,
 		Token:          a.cfg.Token,
 		RequestedPort:  a.cfg.RequestedPort,
-		ClientVersion:  "1.6.0",
+		ClientVersion:  "1.6.1",
 	}
 
 	if err := protocol.WriteMsg(conn, req); err != nil {
@@ -263,6 +265,8 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		a.mu.Unlock()
 	}()
 
+	a.lastServerSeen.Store(time.Now().UnixNano())
+
 	// Open dedicated control stream to server
 	controlStream, err := session.OpenStream()
 	if err != nil {
@@ -273,6 +277,11 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 	controlErrChan := make(chan error, 1)
 	go func() {
 		controlErrChan <- a.listenControlCommands(controlStream)
+	}()
+
+	heartbeatErrChan := make(chan error, 1)
+	go func() {
+		heartbeatErrChan <- a.runHeartbeat(ctx, session, controlStream)
 	}()
 
 	// Wait for context cancellation or stream loop completion
@@ -290,11 +299,12 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 			_ = session.Close()
 			return err
 		}
-		// The control stream is mandatory. If it closes unexpectedly, tear
-		// down the session immediately so Run can reconnect instead of waiting
-		// forever for AcceptStream.
 		_ = session.Close()
 		return fmt.Errorf("control stream ended: %w", err)
+	case err := <-heartbeatErrChan:
+		a.logger.Printf("[AdbLink-Agent] Active heartbeat failed: %v", err)
+		_ = session.Close()
+		return fmt.Errorf("heartbeat failed: %w", err)
 	case err := <-streamErrChan:
 		_ = session.Close()
 		return err
@@ -420,6 +430,44 @@ func (a *Agent) Stop() {
 	}
 }
 
+// runHeartbeat actively sends PING frames to the server and detects connection death.
+func (a *Agent) runHeartbeat(ctx context.Context, session *yamux.Session, stream net.Conn) error {
+	interval := a.cfg.HeartbeatInterval
+	if interval <= 0 {
+		interval = tunnel.DefaultHeartbeatInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	timeoutThreshold := 2*interval + 5*time.Second
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if session.IsClosed() {
+				return errors.New("yamux session closed")
+			}
+
+			lastSeenNano := a.lastServerSeen.Load()
+			if lastSeenNano > 0 && time.Since(time.Unix(0, lastSeenNano)) > timeoutThreshold {
+				return fmt.Errorf("server heartbeat timed out: no response for %v", time.Since(time.Unix(0, lastSeenNano)))
+			}
+
+			a.controlWriteMu.Lock()
+			_ = stream.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			_, err := io.WriteString(stream, "PING\n")
+			_ = stream.SetWriteDeadline(time.Time{})
+			a.controlWriteMu.Unlock()
+
+			if err != nil {
+				return fmt.Errorf("send heartbeat PING failed: %w", err)
+			}
+		}
+	}
+}
+
 // listenControlCommands reads management commands from the server control stream.
 func (a *Agent) listenControlCommands(stream net.Conn) error {
 	reader := bufio.NewReader(stream)
@@ -432,21 +480,25 @@ func (a *Agent) listenControlCommands(stream net.Conn) error {
 		switch cmd {
 		case "STOP":
 			a.logger.Printf("[AdbLink-Agent] Received STOP command from server. Shutting down...")
+			a.controlWriteMu.Lock()
 			_ = stream.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			_, _ = io.WriteString(stream, "STOP_ACK\n")
 			_ = stream.SetWriteDeadline(time.Time{})
+			a.controlWriteMu.Unlock()
 			a.mu.Lock()
 			a.remoteStopped = true
 			a.mu.Unlock()
 			a.Stop()
 			return ErrRemoteStop
 		case "PING":
-			// PONG is only an idle-health hint; a delayed response must not
-			// tear down an otherwise valid ADB session. Yamux's own heartbeat
-			// remains authoritative for transport failure detection.
+			a.lastServerSeen.Store(time.Now().UnixNano())
+			a.controlWriteMu.Lock()
 			_ = stream.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			_, _ = io.WriteString(stream, "PONG\n")
 			_ = stream.SetWriteDeadline(time.Time{})
+			a.controlWriteMu.Unlock()
+		case "PONG":
+			a.lastServerSeen.Store(time.Now().UnixNano())
 		}
 	}
 }
