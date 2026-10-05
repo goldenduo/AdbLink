@@ -288,6 +288,13 @@ func cmdPush(args []string) {
 			time.Sleep(500 * time.Millisecond)
 		}
 	}
+	killArgs := []string{}
+	if *adbSerial != "" {
+		killArgs = append(killArgs, "-s", *adbSerial)
+	}
+	killArgs = append(killArgs, "shell", "pkill -9 adblink-agent 2>/dev/null || true")
+	_ = exec.Command("adb", killArgs...).Run()
+
 	fmt.Println("Launching agent on device...")
 	runArgs := []string{}
 	if *adbSerial != "" {
@@ -295,7 +302,9 @@ func cmdPush(args []string) {
 	}
 	runArgs = append(runArgs, "shell", remotePath, "-server", *serverAddr, "-d")
 	if strings.Contains(*adbSerial, ":") && !strings.Contains(*adbSerial, "._") {
-		runArgs = append(runArgs, "-target", *adbSerial)
+		if _, p, err := net.SplitHostPort(*adbSerial); err == nil && p != "" {
+			runArgs = append(runArgs, "-target", net.JoinHostPort("127.0.0.1", p))
+		}
 	}
 	if *token != "" {
 		runArgs = append(runArgs, "-token", *token)
