@@ -276,7 +276,17 @@ func cmdPush(args []string) {
 		if tcpipOut, err := exec.Command("adb", tcpipArgs...).CombinedOutput(); err != nil {
 			fmt.Printf("Notice: adb tcpip 5555: %s\n", strings.TrimSpace(string(tcpipOut)))
 		}
-		time.Sleep(1 * time.Second)
+		for range 10 {
+			checkArgs := []string{}
+			if *adbSerial != "" {
+				checkArgs = append(checkArgs, "-s", *adbSerial)
+			}
+			checkArgs = append(checkArgs, "get-state")
+			if err := exec.Command("adb", checkArgs...).Run(); err == nil {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
 	}
 	fmt.Println("Launching agent on device...")
 	runArgs := []string{}
