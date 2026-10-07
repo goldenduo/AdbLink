@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -16,7 +18,7 @@ import (
 	"github.com/goldenduo/AdbLink/pkg/server"
 )
 
-var version = "1.6.3"
+var version = "1.7.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -106,14 +108,28 @@ func cmdList(args []string) {
 		return
 	}
 
-	fmt.Printf("%-18s %-16s %-10s %-8s %-12s %-24s\n",
-		"DEVICE ID", "MODEL", "STATUS", "PORT", "STREAMS", "CONNECT COMMAND")
-	fmt.Println(strings.Repeat("-", 90))
+	fmt.Printf("%-18s %-15s %-19s %-10s %-8s %-10s %-24s\n",
+		"DEVICE ID", "MODEL", "CLIENT IP/MODE", "STATUS", "PORT", "STREAMS", "CONNECT COMMAND")
+	fmt.Println(strings.Repeat("-", 108))
 
 	for _, d := range devices {
-		fmt.Printf("%-18s %-16s %-10s %-8d %-12d adb connect %s\n",
+		mode := d.ProxyType
+		if mode == "" {
+			mode = "DIRECT"
+		}
+		ipInfo := d.ClientIP
+		if ipInfo == "" && d.RemoteAddr != "" {
+			ipInfo, _, _ = net.SplitHostPort(d.RemoteAddr)
+		}
+		if ipInfo == "" {
+			ipInfo = "-"
+		}
+		ipDisplay := fmt.Sprintf("%s (%s)", ipInfo, mode)
+
+		fmt.Printf("%-18s %-15s %-19s %-10s %-8d %-10d adb connect %s\n",
 			truncate(d.DeviceID, 17),
-			truncate(d.Model, 15),
+			truncate(d.Model, 14),
+			truncate(ipDisplay, 18),
 			d.Status,
 			d.AssignedPort,
 			d.ActiveStreams,
@@ -188,8 +204,29 @@ func cmdPush(args []string) {
 	forceTcpip := fs.Bool("tcpip", false, "Force 'adb tcpip 5555' even for wireless connections")
 	_ = fs.Parse(args)
 
+	stdinReader := bufio.NewReader(os.Stdin)
+	if *adbSerial == "" {
+		if devs, err := detectAllDevices(); err == nil && len(devs) > 0 {
+			if selected, sErr := promptSelectDevice(devs, stdinReader, os.Stdout); sErr == nil {
+				*adbSerial = selected.Serial
+			}
+		}
+	}
+	serverExplicitlyProvided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "server" {
+			serverExplicitlyProvided = true
+		}
+	})
+	if !serverExplicitlyProvided {
+		chosen, err := promptSelectOrInputServer(loadServerHistory(), stdinReader, os.Stdout)
+		if err == nil && chosen != "" {
+			*serverAddr = chosen
+		}
+	}
 	normServer, _ := normalizeServerAddr(*serverAddr)
 	*serverAddr = normServer
+	recordServerToHistory(*serverAddr)
 
 	// Detect device abi
 	cmdArgs := []string{}
@@ -413,31 +450,66 @@ func cmdAuto(args []string) {
 	forceTcpip := fs.Bool("tcpip", false, "Force 'adb tcpip 5555' even for wireless connections")
 	_ = fs.Parse(args)
 
-	// If positional argument provided without flag (e.g. 'adblink-ctl 1.2.3.4:8888')
+	fmt.Println("==========================================================")
+	fmt.Println("       AdbLink One-Click Auto Deploy & Connect            ")
+	fmt.Println("==========================================================")
+
+	// Step 1: Detect and select target device
+	var targetSerial, model, abi string
+	stdinReader := bufio.NewReader(os.Stdin)
+	if *adbSerial != "" {
+		var err error
+		targetSerial, model, abi, err = detectTargetDevice(*adbSerial)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		devices, err := detectAllDevices()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		selectedDev, err := promptSelectDevice(devices, stdinReader, os.Stdout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		targetSerial = selectedDev.Serial
+		model = selectedDev.Model
+		abi = selectedDev.ABI
+	}
+	fmt.Printf("[1/5] Target device: %s (%s, ABI: %s)\n", model, targetSerial, abi)
+
+	// Step 2: Server address selection / guidance
+	serverExplicitlyProvided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "server" {
+			serverExplicitlyProvided = true
+		}
+	})
 	if fs.NArg() > 0 {
 		pos := fs.Arg(0)
 		if !strings.HasPrefix(pos, "-") {
+			serverExplicitlyProvided = true
 			*serverAddr = pos
 		}
 	}
+
+	if !serverExplicitlyProvided {
+		chosenServer, err := promptSelectOrInputServer(loadServerHistory(), stdinReader, os.Stdout)
+		if err == nil && chosenServer != "" {
+			*serverAddr = chosenServer
+		}
+	}
+
 	// Format and normalize server address & derive Web API URL
 	normServer, defaultWeb := normalizeServerAddr(*serverAddr)
 	*serverAddr = normServer
 	if *webAddr == "" {
 		*webAddr = defaultWeb
 	}
-
-	fmt.Println("==========================================================")
-	fmt.Println("       AdbLink One-Click Auto Deploy & Connect            ")
-	fmt.Println("==========================================================")
-
-	// Step 1: Detect available device
-	targetSerial, model, abi, err := detectTargetDevice(*adbSerial)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("[1/5] Target device: %s (%s, ABI: %s)\n", model, targetSerial, abi)
+	recordServerToHistory(*serverAddr)
 
 	// Step 2: Enable TCP mode for physical USB devices (adb tcpip 5555)
 	if shouldEnableTcpip5555(targetSerial, *forceTcpip) {
@@ -535,6 +607,296 @@ func cmdAuto(args []string) {
 		fmt.Println("⚠ Incomplete: Device agent has not established reverse tunnel yet.")
 	}
 	fmt.Println("==========================================================")
+}
+
+// CandidateDevice describes an online Android device discovered via ADB.
+type CandidateDevice struct {
+	Serial       string
+	Model        string
+	Manufacturer string
+	ABI          string
+	IsUSB        bool
+}
+
+// detectAllDevices scans ADB for all currently connected and authorized devices.
+func detectAllDevices() ([]CandidateDevice, error) {
+	if _, lookErr := exec.LookPath("adb"); lookErr != nil {
+		return nil, fmt.Errorf("ADB command not found in PATH. Please install Android Platform Tools")
+	}
+
+	out, err := exec.Command("adb", "devices").Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to run 'adb devices': %w", err)
+	}
+
+	lines := strings.Split(string(out), "\n")
+	var candidates []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "List of devices") || strings.HasPrefix(line, "*") {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) >= 2 && parts[1] == "device" {
+			candidates = append(candidates, parts[0])
+		}
+	}
+
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("未检测到任何在线 Android 设备，请连接手机并开启 USB 调试后再试")
+	}
+
+	// Filter out existing reverse tunnel ports (55550-55599) if other devices exist
+	filtered := []string{}
+	for _, c := range candidates {
+		isTunnelPort := false
+		for p := 55550; p <= 55599; p++ {
+			if strings.Contains(c, fmt.Sprintf(":%d", p)) {
+				isTunnelPort = true
+				break
+			}
+		}
+		if !isTunnelPort {
+			filtered = append(filtered, c)
+		}
+	}
+	if len(filtered) == 0 {
+		filtered = candidates
+	}
+
+	// Prioritize USB devices first, then network devices
+	var usbList []string
+	var netList []string
+	for _, dev := range filtered {
+		if isUSBDevice(dev) {
+			usbList = append(usbList, dev)
+		} else {
+			netList = append(netList, dev)
+		}
+	}
+	orderedSerials := append(usbList, netList...)
+
+	var result []CandidateDevice
+	for _, s := range orderedSerials {
+		mOut, _ := exec.Command("adb", "-s", s, "shell", "getprop", "ro.product.model").Output()
+		model := strings.TrimSpace(string(mOut))
+		if model == "" {
+			model = "Android Device"
+		}
+
+		mfOut, _ := exec.Command("adb", "-s", s, "shell", "getprop", "ro.product.manufacturer").Output()
+		manufacturer := strings.TrimSpace(string(mfOut))
+
+		aOut, _ := exec.Command("adb", "-s", s, "shell", "getprop", "ro.product.cpu.abi").Output()
+		abi := strings.TrimSpace(string(aOut))
+		if abi == "" {
+			abi = "arm64-v8a"
+		}
+
+		result = append(result, CandidateDevice{
+			Serial:       s,
+			Model:        model,
+			Manufacturer: manufacturer,
+			ABI:          abi,
+			IsUSB:        isUSBDevice(s),
+		})
+	}
+
+	return result, nil
+}
+
+func toBufioReader(r io.Reader) *bufio.Reader {
+	if br, ok := r.(*bufio.Reader); ok {
+		return br
+	}
+	return bufio.NewReader(r)
+}
+
+// promptSelectDevice displays the list of online devices and lets the user choose one.
+func promptSelectDevice(devices []CandidateDevice, in io.Reader, out io.Writer) (CandidateDevice, error) {
+	if len(devices) == 0 {
+		return CandidateDevice{}, fmt.Errorf("未检测到任何可用手机设备")
+	}
+
+	fmt.Fprintf(out, "\n[手机选择] 检测到 %d 台可用 Android 设备:\n", len(devices))
+	for i, dev := range devices {
+		connType := "USB 连接"
+		if !dev.IsUSB {
+			connType = "网络连接"
+		}
+		fmt.Fprintf(out, "  [%d] %s (Serial: %s, ABI: %s) [%s]\n", i+1, dev.Model, dev.Serial, dev.ABI, connType)
+	}
+
+	reader := toBufioReader(in)
+	if len(devices) == 1 {
+		fmt.Fprintf(out, "请确认或选择目标手机 [1] (默认 1): ")
+		_, _ = reader.ReadString('\n')
+		return devices[0], nil
+	}
+
+	for {
+		fmt.Fprintf(out, "请选择目标手机 [1-%d] (默认 1): ", len(devices))
+		line, err := reader.ReadString('\n')
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return devices[0], nil
+		}
+		if num, parseErr := strconv.Atoi(line); parseErr == nil && num >= 1 && num <= len(devices) {
+			return devices[num-1], nil
+		}
+		if err != nil { // EOF
+			return devices[0], nil
+		}
+		fmt.Fprintf(out, "输入无效，请输入 1 到 %d 之间的序号。\n", len(devices))
+	}
+}
+
+// ServerHistory stores recent server addresses.
+type ServerHistory struct {
+	Servers []string `json:"servers"`
+}
+
+func getHistoryFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ".adblink_history.json"
+	}
+	return filepath.Join(home, ".adblink", "history.json")
+}
+
+func loadServerHistory() []string {
+	path := getHistoryFilePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var sh ServerHistory
+	if err := json.Unmarshal(data, &sh); err != nil {
+		return nil
+	}
+	var cleaned []string
+	for _, s := range sh.Servers {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			cleaned = append(cleaned, s)
+		}
+	}
+	return cleaned
+}
+
+func saveServerHistory(servers []string) error {
+	path := getHistoryFilePath()
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	sh := ServerHistory{Servers: servers}
+	data, err := json.MarshalIndent(sh, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func recordServerToHistory(serverAddr string) {
+	serverAddr = strings.TrimSpace(serverAddr)
+	if serverAddr == "" {
+		return
+	}
+	existing := loadServerHistory()
+	var updated []string
+	updated = append(updated, serverAddr)
+	for _, s := range existing {
+		if s != serverAddr && len(updated) < 10 {
+			updated = append(updated, s)
+		}
+	}
+	_ = saveServerHistory(updated)
+}
+
+// promptSelectOrInputServer lets the user choose from server history or input new server IP & port.
+func promptSelectOrInputServer(history []string, in io.Reader, out io.Writer) (string, error) {
+	reader := toBufioReader(in)
+	var chosen string
+
+	if len(history) > 0 {
+		fmt.Fprintf(out, "\n[服务器配置] 请选择或输入 AdbLink 服务器地址与端口:\n")
+		for i, s := range history {
+			label := ""
+			if i == 0 {
+				label = " (最近使用)"
+			}
+			fmt.Fprintf(out, "  [%d] %s%s\n", i+1, s, label)
+		}
+		newOpt := len(history) + 1
+		fmt.Fprintf(out, "  [%d] 手动输入新的服务器地址与端口\n", newOpt)
+
+		for {
+			fmt.Fprintf(out, "请选择 [1-%d] (默认 1): ", newOpt)
+			line, err := reader.ReadString('\n')
+			line = strings.TrimSpace(line)
+			if line == "" {
+				chosen = history[0]
+				break
+			}
+			num, parseErr := strconv.Atoi(line)
+			if parseErr == nil && num >= 1 && num <= len(history) {
+				chosen = history[num-1]
+				break
+			}
+			if parseErr == nil && num == newOpt {
+				// User wants to input new server
+				break
+			}
+			if err != nil { // EOF
+				chosen = history[0]
+				break
+			}
+			fmt.Fprintf(out, "输入无效，请输入 1 到 %d 之间的数字。\n", newOpt)
+		}
+	}
+
+	if chosen != "" {
+		return chosen, nil
+	}
+
+	// Guide user to input server IP and port
+	fmt.Fprintf(out, "\n[服务器配置] 请引导输入服务器连接信息:\n")
+	fmt.Fprintf(out, "请输入服务器 IP 地址或域名 (例如: 1.2.3.4 或 1.2.3.4:8888，默认: 127.0.0.1): ")
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(line)
+
+	var host string
+	var port string
+
+	if line == "" {
+		host = "127.0.0.1"
+	} else if strings.Contains(line, ":") {
+		// User entered host:port directly
+		h, p, err := net.SplitHostPort(line)
+		if err == nil {
+			host = h
+			port = p
+		} else {
+			host = line
+		}
+	} else {
+		host = line
+	}
+
+	if port == "" {
+		fmt.Fprintf(out, "请输入服务器端口 (默认: 8888): ")
+		pLine, _ := reader.ReadString('\n')
+		pLine = strings.TrimSpace(pLine)
+		if pLine == "" {
+			port = "8888"
+		} else {
+			port = pLine
+		}
+	}
+
+	addr := net.JoinHostPort(host, port)
+	return addr, nil
 }
 
 func detectTargetDevice(specifiedSerial string) (serial, model, abi string, err error) {

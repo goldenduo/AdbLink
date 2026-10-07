@@ -43,6 +43,8 @@ type RegisterRequest struct {
 	Token          string `json:"token,omitempty"`
 	RequestedPort  int    `json:"requested_port,omitempty"` // 0 means server allocates
 	ClientVersion  string `json:"client_version,omitempty"`
+	DeviceIP       string `json:"device_ip,omitempty"`
+	ProxyType      string `json:"proxy_type,omitempty"`
 }
 
 // RegisterResponse is sent by the Server to accept or reject the agent registration.

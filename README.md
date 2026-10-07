@@ -54,8 +54,8 @@ When an Android phone is behind NAT, firewalls, or mobile data networks (4G/5G) 
 - **Reliable Manual Disconnect**: A Web Dashboard disconnect sends a STOP command and acknowledgement, blocks the reconnect race, and releases the port immediately.
 - **Android Keep-Awake Safeguards**: On Android, the agent best-effort disables Doze and prevents Wi-Fi sleep while running, restoring the original settings on exit. A standalone native process cannot obtain a true partial wakelock without an Android app/permission; `termux-wake-lock` is used automatically when available.
 - **Multi-Architecture**: Cross-compiled binaries for ARM64, ARMv7, x86_64, and x86.
-- **Modern Web Dashboard**: Embedded dark-mode web management console with zero external CDN dependencies.
-- **CLI Management**: `adblink-ctl` for listing devices, auto-connecting, and deploying agents.
+- **Modern Web Dashboard**: Embedded dark-mode web management console with zero external CDN dependencies, recording and displaying client IP addresses along with connection modes (SOCKS5 proxy vs direct).
+- **Interactive CLI Management**: `adblink-ctl` prompts to select target connected phones, guides server address/port configuration with automatic history caching for quick recall.
 
 ---
 

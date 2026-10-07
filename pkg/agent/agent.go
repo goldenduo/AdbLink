@@ -61,6 +61,49 @@ type Agent struct {
 	cancelFunc     context.CancelFunc
 	controlWriteMu sync.Mutex
 	lastServerSeen atomic.Int64
+	lastProxyType  string
+	lastProxyAddr  string
+}
+func (a *Agent) setProxyInfo(proxyType, proxyAddr string) {
+	a.mu.Lock()
+	a.lastProxyType = proxyType
+	a.lastProxyAddr = proxyAddr
+	a.mu.Unlock()
+}
+
+func (a *Agent) getProxyInfo() (string, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastProxyType, a.lastProxyAddr
+}
+
+func getDeviceLocalIP() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip != nil && !ip.IsLoopback() && ip.To4() != nil {
+				return ip.String()
+			}
+		}
+	}
+	return ""
 }
 
 // NewAgent creates a new Agent instance.
@@ -207,6 +250,12 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 	// Perform registration handshake
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
+	proxyType, _ := a.getProxyInfo()
+	if proxyType == "" {
+		proxyType = "DIRECT"
+	}
+	deviceIP := getDeviceLocalIP()
+
 	req := protocol.RegisterRequest{
 		Magic:          protocol.MagicHeader,
 		Version:        protocol.CurrentProtocolVersion,
@@ -216,7 +265,9 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		AndroidVersion: a.cfg.AndroidVersion,
 		Token:          a.cfg.Token,
 		RequestedPort:  a.cfg.RequestedPort,
-		ClientVersion:  "1.6.3",
+		ClientVersion:  "1.7.0",
+		DeviceIP:       deviceIP,
+		ProxyType:      proxyType,
 	}
 
 	if err := protocol.WriteMsg(conn, req); err != nil {

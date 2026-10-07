@@ -92,6 +92,12 @@ func TestAgentServerTunnel(t *testing.T) {
 	if !found {
 		t.Fatalf("device did not register in time")
 	}
+	if devInfo.ClientIP != "127.0.0.1" {
+		t.Fatalf("expected ClientIP 127.0.0.1, got %q", devInfo.ClientIP)
+	}
+	if devInfo.ProxyType != "DIRECT" && devInfo.ProxyType != "SOCKS5" {
+		t.Fatalf("expected ProxyType DIRECT or SOCKS5, got %q", devInfo.ProxyType)
+	}
 	initialLastSeen := devInfo.LastSeenAt
 	time.Sleep(80 * time.Millisecond)
 	updatedInfo, ok := srv.GetDevice("test-device-001")

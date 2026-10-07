@@ -58,6 +58,9 @@ type DeviceInfo struct {
 	Manufacturer     string    `json:"manufacturer"`
 	AndroidVersion   string    `json:"android_version"`
 	RemoteAddr       string    `json:"remote_addr"`
+	ClientIP         string    `json:"client_ip"`
+	DeviceIP         string    `json:"device_ip,omitempty"`
+	ProxyType        string    `json:"proxy_type,omitempty"`
 	AssignedPort     int       `json:"assigned_port"`
 	AdbConnectTarget string    `json:"adb_connect_target"`
 	ConnectedAt      time.Time `json:"connected_at"`
@@ -323,7 +326,7 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 		Status:        protocol.StatusOK,
 		Message:       "Registration successful",
 		AssignedPort:  assignedPort,
-		ServerVersion: "1.6.3",
+		ServerVersion: "1.7.0",
 		AdvertiseHost: s.cfg.AdvertiseHost,
 	}
 	if err := protocol.WriteMsg(conn, resp); err != nil {
@@ -353,8 +356,8 @@ func (s *Server) handleAgentConn(conn net.Conn) {
 	}
 
 	devSession := s.registerDeviceSession(req, remoteAddr, assignedPort, session, adbListener)
-	s.logger.Printf("Device registered: %s (model: %s) -> Port %d. Connect via: adb connect %s",
-		req.DeviceID, req.Model, assignedPort, net.JoinHostPort(s.cfg.AdvertiseHost, strconv.Itoa(assignedPort)))
+	s.logger.Printf("Device registered: %s (model: %s, ip: %s, mode: %s) -> Port %d. Connect via: adb connect %s",
+		req.DeviceID, req.Model, devSession.info.ClientIP, devSession.info.ProxyType, assignedPort, net.JoinHostPort(s.cfg.AdvertiseHost, strconv.Itoa(assignedPort)))
 
 	// Accept and monitor the dedicated control stream from the agent. Keeping
 	// this reader alive is also what lets an explicit web-console disconnect
@@ -383,6 +386,15 @@ func (s *Server) registerDeviceSession(
 	s.mu.Lock()
 	oldSession := s.devices[req.DeviceID]
 
+	clientIP, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil || clientIP == "" {
+		clientIP = remoteAddr
+	}
+	proxyType := req.ProxyType
+	if proxyType == "" {
+		proxyType = "DIRECT"
+	}
+
 	devSession := &DeviceSession{
 		info: DeviceInfo{
 			DeviceID:         req.DeviceID,
@@ -390,6 +402,9 @@ func (s *Server) registerDeviceSession(
 			Manufacturer:     req.Manufacturer,
 			AndroidVersion:   req.AndroidVersion,
 			RemoteAddr:       remoteAddr,
+			ClientIP:         clientIP,
+			DeviceIP:         req.DeviceIP,
+			ProxyType:        proxyType,
 			AssignedPort:     assignedPort,
 			AdbConnectTarget: net.JoinHostPort(s.cfg.AdvertiseHost, strconv.Itoa(assignedPort)),
 			ConnectedAt:      time.Now(),

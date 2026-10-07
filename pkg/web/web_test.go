@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/goldenduo/AdbLink/pkg/server"
@@ -148,5 +149,21 @@ func TestWebEndpoints(t *testing.T) {
 	// Token should now be invalid
 	if ws.auth.ValidateSession(rememberCookie.Value) {
 		t.Fatalf("session should be invalid after logout")
+	}
+}
+
+func TestWebDashboardIPAndProxyUI(t *testing.T) {
+	// 1. Verify indexHTML template contains IP and mode elements
+	if !strings.Contains(indexHTML, "CLIENT IP / 连接模式") {
+		t.Fatal("expected indexHTML to contain 'CLIENT IP / 连接模式' column")
+	}
+	if !strings.Contains(indexHTML, "badge-socks5") {
+		t.Fatal("expected indexHTML to contain 'badge-socks5' CSS class")
+	}
+	if !strings.Contains(indexHTML, "badge-direct") {
+		t.Fatal("expected indexHTML to contain 'badge-direct' CSS class")
+	}
+	if !strings.Contains(indexHTML, "dev.client_ip") {
+		t.Fatal("expected indexHTML to use dev.client_ip")
 	}
 }

@@ -431,6 +431,9 @@ const indexHTML = `<!DOCTYPE html>
   .badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
   .badge-online { background: rgba(63, 185, 80, 0.15); color: var(--success); }
   .badge-offline { background: rgba(210, 153, 34, 0.15); color: var(--warn); }
+  .badge-socks5 { background: rgba(163, 113, 247, 0.15); color: #a371f7; }
+  .badge-http { background: rgba(88, 166, 255, 0.15); color: var(--primary); }
+  .badge-direct { background: rgba(63, 185, 80, 0.15); color: var(--success); }
   .badge-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .code-box { font-family: var(--mono); font-size: 13px; background: #0e1319; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; display: inline-flex; align-items: center; gap: 8px; }
   
@@ -564,6 +567,7 @@ const indexHTML = `<!DOCTYPE html>
           <th>STATUS</th>
           <th>DEVICE ID</th>
           <th>MODEL</th>
+          <th>CLIENT IP / 连接模式</th>
           <th>ANDROID</th>
           <th>PORT</th>
           <th>ADB CONNECT COMMAND</th>
@@ -573,7 +577,7 @@ const indexHTML = `<!DOCTYPE html>
         </tr>
       </thead>
       <tbody id="device-tbody">
-        <tr><td colspan="9" class="empty-state">Loading device data...</td></tr>
+        <tr><td colspan="10" class="empty-state">Loading device data...</td></tr>
       </tbody>
     </table>
   </div>
@@ -789,7 +793,7 @@ function loadDevices() {
       if (!data) return;
       const tbody = document.getElementById('device-tbody');
       if (!data || data.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No Android devices connected. Run adblink-agent on your phone to connect.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No Android devices connected. Run adblink-agent on your phone to connect.</td></tr>';
         document.getElementById('stat-online').innerText = '0';
         document.getElementById('stat-conns').innerText = '0';
         document.getElementById('stat-streams').innerText = '0';
@@ -811,10 +815,31 @@ function loadDevices() {
         totalBytes += ((dev.bytes_sent || 0) + (dev.bytes_received || 0));
 
         const connectCmd = 'adb connect ' + dev.adb_connect_target;
+        const clientIP = dev.client_ip || (dev.remote_addr ? dev.remote_addr.split(':')[0] : '-');
+        const proxyType = dev.proxy_type || 'DIRECT';
+        let modeBadge = '';
+        if (proxyType === 'SOCKS5') {
+          modeBadge = '<span class="badge badge-socks5" title="通过 SOCKS5 代理连接"><span class="badge-dot"></span>SOCKS5 代理</span>';
+        } else if (proxyType === 'HTTP') {
+          modeBadge = '<span class="badge badge-http" title="通过 HTTP 代理连接"><span class="badge-dot"></span>HTTP 代理</span>';
+        } else {
+          modeBadge = '<span class="badge badge-direct" title="直连"><span class="badge-dot"></span>直连</span>';
+        }
+        let ipCell = '<div style="display:flex; flex-direction:column; gap:3px;">' +
+          '<div style="display:flex; align-items:center; gap:6px;">' +
+            '<span style="font-family: var(--mono); font-weight: 500;">' + clientIP + '</span>' +
+            modeBadge +
+          '</div>';
+        if (dev.device_ip && dev.device_ip !== clientIP) {
+          ipCell += '<span style="font-size: 11px; color: var(--text-muted);">局域网: ' + dev.device_ip + '</span>';
+        }
+        ipCell += '</div>';
+
         html += '<tr>';
         html += '<td><span class="badge ' + (isOnline ? 'badge-online' : 'badge-offline') + '"><span class="badge-dot"></span>' + dev.status + '</span></td>';
         html += '<td style="font-family: var(--mono); font-weight: 500;">' + dev.device_id + '</td>';
         html += '<td>' + (dev.model || '-') + '</td>';
+        html += '<td>' + ipCell + '</td>';
         html += '<td>' + (dev.android_version || '-') + '</td>';
         html += '<td style="font-family: var(--mono); font-weight: 600; color: var(--primary);">' + dev.assigned_port + '</td>';
         html += '<td><div class="code-box"><span>' + connectCmd + '</span><button class="btn btn-copy" onclick="copyCmd(\'' + connectCmd + '\')">Copy</button></div></td>';

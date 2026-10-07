@@ -93,6 +93,10 @@ func TestDialServerWithMockSOCKS5(t *testing.T) {
 	}
 	defer conn.Close()
 
+	pType, pAddr := ag.getProxyInfo()
+	if pType != "SOCKS5" || pAddr != proxyAddr {
+		t.Fatalf("expected proxy info SOCKS5 and %s, got %s and %s", proxyAddr, pType, pAddr)
+	}
 	// Verify connection is usable
 	msg := []byte("hello proxy")
 	if _, err := conn.Write(msg); err != nil {

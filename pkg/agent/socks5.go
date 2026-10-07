@@ -124,11 +124,13 @@ func (a *Agent) dialTransport(ctx context.Context) (net.Conn, error) {
 		// User explicitly configured a proxy. Try SOCKS5 first, then HTTP CONNECT.
 		sConn, sDetected, sErr := dialSOCKS5(ctx, proxyAddr, a.cfg.ServerAddr, a.cfg.DialTimeout)
 		if sDetected && sErr == nil {
+			a.setProxyInfo("SOCKS5", proxyAddr)
 			a.logPrintf("Connecting to %s through explicitly configured SOCKS5 proxy %s", a.cfg.ServerAddr, proxyAddr)
 			return sConn, nil
 		}
 		hConn, hDetected, hErr := dialHTTPProxy(ctx, proxyAddr, a.cfg.ServerAddr, a.cfg.DialTimeout)
 		if hDetected && hErr == nil {
+			a.setProxyInfo("HTTP", proxyAddr)
 			a.logPrintf("Connecting to %s through explicitly configured HTTP proxy %s", a.cfg.ServerAddr, proxyAddr)
 			return hConn, nil
 		}
@@ -149,6 +151,7 @@ func (a *Agent) dialTransport(ctx context.Context) (net.Conn, error) {
 				a.logPrintf("SOCKS5 proxy detected at %s, but proxy connection failed: %v", proxyAddr, proxyErr)
 				return nil, proxyErr
 			}
+			a.setProxyInfo("SOCKS5", proxyAddr)
 			a.logPrintf("SOCKS5 proxy detected at %s; connecting to %s through proxy", proxyAddr, a.cfg.ServerAddr)
 			return proxyConn, nil
 		}
@@ -160,6 +163,7 @@ func (a *Agent) dialTransport(ctx context.Context) (net.Conn, error) {
 				a.logPrintf("HTTP proxy detected at %s, but proxy connection failed: %v", proxyAddr, httpErr)
 				return nil, httpErr
 			}
+			a.setProxyInfo("HTTP", proxyAddr)
 			a.logPrintf("HTTP proxy detected at %s; connecting to %s through proxy", proxyAddr, a.cfg.ServerAddr)
 			return httpConn, nil
 		}
@@ -172,6 +176,7 @@ func (a *Agent) dialTransport(ctx context.Context) (net.Conn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	a.setProxyInfo("DIRECT", "")
 	a.logPrintf("No proxy detected at %s; connecting directly to %s", strings.Join(candidates, " or "), a.cfg.ServerAddr)
 	dialer := &net.Dialer{Timeout: a.cfg.DialTimeout}
 	return dialer.DialContext(ctx, "tcp", a.cfg.ServerAddr)
